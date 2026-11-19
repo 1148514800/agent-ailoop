@@ -8,6 +8,16 @@ Agent Autoloop 的独立本地管理控制台。在浏览器里查看任务、�
 
 需要 Node.js 24 或更新版本、npm，以及已经安装并配置本人密钥的 [Agent Autoloop](https://github.com/KKKKhazix/agent-autoloop)。控制台默认连接当前账号的中台。中台的安装方式见 [原项目安装说明](https://github.com/KKKKhazix/agent-autoloop/blob/main/INSTALL.md)。
 
+### macOS 双击启动
+
+在 Finder 双击项目根目录的 [启动控制台.command](启动控制台.command)。它会启动尚未运行的本机中台和 Web 控制台，等待两者就绪，再打开默认浏览器。第一次启动控制台会安装依赖并构建页面。已运行的服务直接复用，关闭启动终端后服务仍在后台运行。
+
+浏览器需要登录时，输入启动窗口显示的控制台登录码。由此脚本启动的控制台会把登录码保留在本人的私有日志目录 `~/Library/Logs/Agent Autoloop Console`，重复双击时可以再次看到。通过其他方式启动的控制台继续使用它原先显示的登录码。
+
+如果 Finder 提示没有执行权限，在项目目录运行 `chmod +x ./启动控制台.command`。启动器使用固定端口，默认 `4175`。如果端口被其他程序占用，可以用 `AUTOLOOP_CONSOLE_PORT` 指定另一个端口。
+
+### 命令行启动
+
 在本项目目录运行：
 
 ```sh
@@ -78,7 +88,7 @@ npm run test:browser -- --screenshots
 
 浏览器测试默认从同级的 `agent-autoloop` 源码启动临时中台。可用 `AUTOLOOP_SOURCE` 指定源码路径，也可用 `AUTOLOOP_BROWSER_CHANNEL=chrome` 选择已安装的 Chrome。测试使用临时目录、随机端口和测试 Worker 请求，结束后退出进程并清理目录。截图只包含临时中台中的虚构资料。
 
-已在 macOS 上使用 Node.js 24.22.3 和 Chrome 验证。类型检查、生产构建、3 项自动化测试和真实 HTTP 浏览器验收均通过。浏览器验收覆盖零号审批选项、手机文字回复、通知结案、规则控制、轮次停止确认、历史分页及筛选、断线期间事件续读和中台离线状态。开发模式通过启动和认证拦截检查。测试 Worker 用协议上报领取与停止确认。
+已在 macOS 上使用 Node.js 24.22.3 和 Chrome 验证。类型检查、生产构建、5 项自动化测试（含 macOS 启动与复用）和真实 HTTP 浏览器验收均通过。浏览器验收覆盖零号审批选项、手机文字回复、通知结案、规则控制、轮次停止确认、历史分页及筛选、断线期间事件续读和中台离线状态。开发模式通过启动和认证拦截检查。测试 Worker 用协议上报领取与停止确认。
 
 - [运行总览](docs/screenshots/overview.png)
 - [桌面审批](docs/screenshots/approvals.png)

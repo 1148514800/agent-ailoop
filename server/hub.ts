@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export type Hub = { url: string; owner: string; secrets: string[] };
 
-export async function loadHub(): Promise<Hub> {
+export async function loadHub(): Promise<Hub & { localService: boolean }> {
   const file = join(process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(), ".agent-autoloop"), "config.json");
   const config = JSON.parse(await readFile(file, "utf8"));
   if (typeof config?.owner !== "string" || !/^[\x21-\x7e]+$/.test(config.owner)) throw new Error("Missing owner");
@@ -25,7 +25,12 @@ export async function loadHub(): Promise<Hub> {
   })[0];
   if (!url) throw new Error("Invalid hub URL");
   const keys = [config.worker?.key, config.source?.key, ...Object.values(config.channels ?? {}).map((channel) => (channel as { key?: string } | null)?.key)];
-  return { url, owner: config.owner, secrets: keys.filter((value): value is string => typeof value === "string" && value.length > 0) };
+  return {
+    url,
+    owner: config.owner,
+    secrets: keys.filter((value): value is string => typeof value === "string" && value.length > 0),
+    localService: typeof config.hub?.listen === "string",
+  };
 }
 
 type Row = Record<string, unknown>;
