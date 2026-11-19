@@ -5,7 +5,7 @@ import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export async function fixture(home) {
-  const original = resolve(process.env.AUTOLOOP_SOURCE ?? join(import.meta.dirname, "../../agent-autoloop"));
+  const original = resolve(process.env.AUTOLOOP_SOURCE ?? join(import.meta.dirname, "../agent-autoloop"));
   const rulesFile = join(home, "rules.json");
   process.env.AGENT_AUTOLOOP_HOME = home;
   process.env.AGENT_AUTOLOOP_RULES = rulesFile;

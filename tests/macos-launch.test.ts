@@ -1,4 +1,4 @@
-// Double-clicking twice should keep the original processes and login code, and an unrelated listener must never be opened.
+// The launcher must use its bundled hub, preserve both services on a second launch, and leave unrelated listeners alone.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -34,24 +34,26 @@ async function setup(t: TestContext) {
   const opens = join(home, "opened");
   const counters = join(home, "commands");
   const logs = join(home, "Library", "Logs", "Agent Autoloop Console");
-  await Promise.all([bin, workspace, hubHome, join(workspace, "scripts")].map((path) => mkdir(path, { recursive: true })));
-  for (const part of ["启动控制台.command", "package-lock.json", "scripts/start-macos.ts", "server"]) {
+  const hubBin = join(workspace, "agent-autoloop", "bin");
+  await Promise.all([bin, hubHome, join(workspace, "scripts"), hubBin].map((path) => mkdir(path, { recursive: true })));
+  for (const part of ["启动控制台.command", "package-lock.json", "scripts/start-macos.ts", "scripts/hub.ts", "server"]) {
     await cp(join(root, part), join(workspace, part), { recursive: true });
   }
   await writeFile(join(hubHome, "config.json"), JSON.stringify({
     url: "http://127.0.0.1:" + hubPort, owner: "fixture-owner", hub: { listen: "127.0.0.1:" + hubPort },
   }), { mode: 0o600 });
-  await writeFile(join(home, "hub.mjs"), `
+  await writeFile(join(hubBin, "agent-autoloop.ts"), String.raw`
+    import { appendFileSync } from "node:fs";
     import { createServer } from "node:http";
+    if (process.argv[2] !== "up") process.exit(1);
+    appendFileSync(process.env.COMMANDS, "hub\n");
     createServer((req, res) => {
       res.writeHead(req.url === "/healthz" ? 200 : 404, {"content-type": "application/json"});
       res.end(JSON.stringify({ok:true,commit:"fixture"}));
     }).listen(${hubPort}, "127.0.0.1");
   `);
   const sh = (name: string, body: string) => writeFile(join(bin, name), "#!/bin/sh\nset -eu\n" + body, { mode: 0o700 });
-  await sh("agent-autoloop", `printf '%s\\n' hub >> "$COMMANDS"
-[ "$1" = up ]
-exec node "$HOME/hub.mjs"`);
+  await sh("agent-autoloop", "exit 1");
   await sh("open", `printf '%s\\n' "$1" >> "$OPENS"`);
   await sh("npm", `printf '%s\\n' "$1" >> "$COMMANDS"
 case "$1" in

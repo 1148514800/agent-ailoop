@@ -1,16 +1,27 @@
 # Agent Autoloop Console
 
-Agent Autoloop 的独立本地管理控制台。在浏览器里查看任务、控制规则、回复卡片并跟踪中台事件。
+同一个仓库包含 Agent Autoloop 中台和它的本地 Web 控制台。在浏览器里查看任务、控制规则、回复卡片并跟踪中台事件。
+
+- [`agent-autoloop/`](agent-autoloop/) 包含完整的 Agent Autoloop 源码、CLI、插件和测试，保留 [上游 MIT 许可](agent-autoloop/LICENSE)。源码对应已验证的 [上游提交 `ca5c0ff`](https://github.com/KKKKhazix/agent-autoloop/commit/ca5c0ffe2c92be17502c4f1a75cdb71823eeafef)。
+- [`src/`](src/) 和 [`server/`](server/) 是 Web 控制台前端和本地 API 代理。
 
 ![运行总览，临时测试中台](docs/screenshots/overview.png)
 
 ## 启动
 
-需要 Node.js 24 或更新版本、npm，以及已经安装并配置本人密钥的 [Agent Autoloop](https://github.com/KKKKhazix/agent-autoloop)。控制台默认连接当前账号的中台。中台的安装方式见 [原项目安装说明](https://github.com/KKKKhazix/agent-autoloop/blob/main/INSTALL.md)。
+需要 Node.js 24 或更新版本、npm，以及一个已安装并登录的命令行 Agent。只需克隆本仓库。已经配置过 Agent Autoloop 时，控制台会读取当前账号的中台配置。
+
+第一次使用 Agent Autoloop 时，在仓库根目录初始化中台：
+
+```sh
+npm run hub -- init --no-service
+```
+
+初始化会在当前用户的数据目录生成配置和本人密钥。中台 CLI 随仓库提供，参数和使用方式见 [上游安装说明](agent-autoloop/INSTALL.md)。
 
 ### macOS 双击启动
 
-在 Finder 双击项目根目录的 [启动控制台.command](启动控制台.command)。它会启动尚未运行的本机中台和 Web 控制台，等待两者就绪，再打开默认浏览器。第一次启动控制台会安装依赖并构建页面。已运行的服务直接复用，关闭启动终端后服务仍在后台运行。
+在 Finder 双击项目根目录的 [启动控制台.command](启动控制台.command)。它会使用仓库里的源码启动尚未运行的本机中台，再启动 Web 控制台，等两者就绪后打开默认浏览器。第一次启动控制台会安装依赖并构建页面。已运行的服务直接复用，关闭启动终端后服务仍在后台运行。
 
 浏览器需要登录时，输入启动窗口显示的控制台登录码。由此脚本启动的控制台会把登录码保留在本人的私有日志目录 `~/Library/Logs/Agent Autoloop Console`，重复双击时可以再次看到。通过其他方式启动的控制台继续使用它原先显示的登录码。
 
@@ -18,7 +29,13 @@ Agent Autoloop 的独立本地管理控制台。在浏览器里查看任务、�
 
 ### 命令行启动
 
-在本项目目录运行：
+如果中台尚未运行，在仓库根目录的一个终端运行：
+
+```sh
+npm run hub -- up
+```
+
+在同一目录的另一个终端启动 Web 控制台：
 
 ```sh
 npm ci
@@ -28,13 +45,12 @@ npm start
 
 打开终端显示的本机地址，默认是 [http://127.0.0.1:4175](http://127.0.0.1:4175)。输入同一终端显示的**控制台登录码**。登录后可在「运行设置」检查中台状态。控制台登录码每次启动重新生成，浏览器会话最长 12 小时。终端可以保持打开，按 Ctrl+C 退出控制台。
 
-| 系统 | 中台运行方式 | 默认读取的配置 |
-| --- | --- | --- |
-| Windows | 原安装器通常配置登录后启动。手动运行时在 PowerShell 执行 `agent-autoloop up`。 | `%USERPROFILE%\.agent-autoloop\config.json` |
-| macOS | 原安装器通常用 launchd。手动运行时在终端执行 `agent-autoloop up`。 | `~/.agent-autoloop/config.json` |
-| Linux | 原安装器通常用 systemd 用户服务。手动运行时在终端执行 `agent-autoloop up`。 | `~/.agent-autoloop/config.json` |
+| 系统 | 默认读取的中台配置 |
+| --- | --- |
+| Windows | `%USERPROFILE%\.agent-autoloop\config.json` |
+| macOS、Linux | `~/.agent-autoloop/config.json` |
 
-只有在中台尚未运行时才执行 `agent-autoloop up`。`npm run dev` 用同一个本地代理启动开发模式，Vite 自动重建前端，改动后刷新网页即可。
+维护仓库内的中台和控制台时，用 `git pull` 更新两者。`npm run dev` 用同一个本地代理启动开发模式，Vite 自动重建前端，改动后刷新网页即可。
 
 ### 自定义本机配置
 
@@ -68,7 +84,7 @@ npm start
 | 事件动态 | 先读 `state.seq`，再订阅 `GET /v1/stream?after=<seq>`。重连从最后处理的序号续读，浏览器保留本次会话最新 200 条。快照随事件刷新，并定期检查连接与心跳。 |
 | 运行设置 | `GET /healthz` 返回运行提交，`state` 提供时区、Agent、规则和通道信息。最近一次读取失败只保留在当前网页会话。 |
 
-协议基线为 Agent Autoloop 提交 `ca5c0ffe2c92be17502c4f1a75cdb71823eeafef`。可参考原项目的 [本人 API 和暂停补跑协议](https://github.com/KKKKhazix/agent-autoloop/blob/ca5c0ffe2c92be17502c4f1a75cdb71823eeafef/docs/protocol.md#本人看全局回答结案停止)。
+中台接口细节见本仓库所附的 [本人 API 和暂停补跑协议](agent-autoloop/docs/protocol.md#本人看全局回答结案停止)。
 
 ## 本地安全边界
 
@@ -86,7 +102,9 @@ npx playwright install chromium
 npm run test:browser -- --screenshots
 ```
 
-浏览器测试默认从同级的 `agent-autoloop` 源码启动临时中台。可用 `AUTOLOOP_SOURCE` 指定源码路径，也可用 `AUTOLOOP_BROWSER_CHANNEL=chrome` 选择已安装的 Chrome。测试使用临时目录、随机端口和测试 Worker 请求，结束后退出进程并清理目录。截图只包含临时中台中的虚构资料。
+上游完整测试需要独立检出上游提交，因为其中一项测试会读取中台自己的 Git 提交。仓库根目录的测试验证中台与控制台集成。
+
+浏览器测试默认从本仓库的 `agent-autoloop/` 源码启动临时中台。可用 `AUTOLOOP_SOURCE` 指定源码路径，也可用 `AUTOLOOP_BROWSER_CHANNEL=chrome` 选择已安装的 Chrome。测试使用临时目录、随机端口和测试 Worker 请求，结束后退出进程并清理目录。截图只包含临时中台中的虚构资料。
 
 已在 macOS 上使用 Node.js 24.22.3 和 Chrome 验证。类型检查、生产构建、5 项自动化测试（含 macOS 启动与复用）和真实 HTTP 浏览器验收均通过。浏览器验收覆盖零号审批选项、手机文字回复、通知结案、规则控制、轮次停止确认、历史分页及筛选、断线期间事件续读和中台离线状态。开发模式通过启动和认证拦截检查。测试 Worker 用协议上报领取与停止确认。
 

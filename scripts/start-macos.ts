@@ -100,8 +100,9 @@ async function main() {
   if (!/^\d+$/.test(value) || !Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("AUTOLOOP_CONSOLE_PORT 必须在 1 到 65535 之间。");
   }
-  const hub = await loadHub().catch(() => {
-    throw new Error("无法读取本机中台配置。请先安装 Agent Autoloop，并检查 config.json 中的本人密钥和回环地址。");
+  const hub = await loadHub().catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new Error("尚未初始化中台。请在项目目录运行 npm run hub -- init --no-service，再打开控制台。");
+    throw new Error("无法读取本机中台配置。请检查 config.json 中的本人密钥和回环地址。");
   });
   const consoleUrl = "http://127.0.0.1:" + port + "/";
   const checkHub = () => probe(hub.url + "/healthz", async (res) => {
@@ -117,7 +118,7 @@ async function main() {
   if (consoleStatus === "down") await buildConsole();
   if (hubStatus === "down") {
     console.log("正在启动本机中台…");
-    await startService("agent-autoloop", ["up"], "hub", "中台", checkHub);
+    await startService(process.execPath, ["--disable-warning=ExperimentalWarning", join(root, "scripts", "hub.ts"), "up"], "hub", "中台", checkHub);
   } else {
     console.log("复用已运行的中台。");
   }
