@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type Hub = { url: string; owner: string; secrets: string[] };
+export type Hub = { url: string; owner: string; secrets: string[]; source?: { name: string; key: string } };
 
 export async function loadHub(): Promise<Hub & { localService: boolean }> {
   const file = join(process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(), ".agent-autoloop"), "config.json");
@@ -24,10 +24,14 @@ export async function loadHub(): Promise<Hub & { localService: boolean }> {
     } catch { return []; }
   })[0];
   if (!url) throw new Error("Invalid hub URL");
+  const source = typeof config.source?.name === "string" && /^[a-z][a-z0-9-]*$/.test(config.source.name) &&
+    typeof config.source.key === "string" && /^[\x21-\x7e]+$/.test(config.source.key)
+    ? { name: config.source.name, key: config.source.key } : undefined;
   const keys = [config.worker?.key, config.source?.key, ...Object.values(config.channels ?? {}).map((channel) => (channel as { key?: string } | null)?.key)];
   return {
     url,
     owner: config.owner,
+    source,
     secrets: keys.filter((value): value is string => typeof value === "string" && value.length > 0),
     localService: typeof config.hub?.listen === "string",
   };

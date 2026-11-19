@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, ArrowRight, Bot, ChevronRight, ClipboardCheck, Command, LayoutDashboard, ListTodo, LoaderCircle, LockKeyhole, Menu, Moon, RefreshCw, Server, Settings2, Sun, Workflow, X } from "lucide-react";
+import { Activity, Bot, ChevronRight, ClipboardCheck, LayoutDashboard, ListTodo, LoaderCircle, LockKeyhole, Menu, Moon, RefreshCw, Server, Settings2, Sun, Workflow, X } from "lucide-react";
 import type { Pause } from "../shared/types.ts";
 import { Approvals } from "./approvals.tsx";
 import { Dashboard } from "./dashboard.tsx";
+import { RouterPanel } from "./router.tsx";
+import type { SendRouterMessage } from "./router.tsx";
+import type { RouterResult } from "../shared/router.ts";
 import { api, ApiError, fmtDate, messageOf } from "./data.ts";
 import { useLive } from "./live.ts";
 import { Agents, Rules, Settings } from "./manage.tsx";
@@ -24,7 +27,7 @@ const navigation = [
 ] as const;
 
 const defaultRoute = navigation[0];
-type Session = { authenticated: boolean; csrf?: string };
+type Session = { csrf: string };
 type Theme = "dark" | "light";
 
 function readRoute() {
@@ -42,31 +45,6 @@ function positiveId(value: string | null) {
 
 function Brand() {
   return <div className="brand"><img src="/mark.svg" alt="" width="39" height="39" /><div><strong>Autoloop</strong><small>管理控制台</small></div></div>;
-}
-
-function Login({ start, boot, failure }: { start(csrf: string): void; boot: boolean; failure: string }) {
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  return <div className="login-layout">
-    <main className="login-box"><Brand /><div className="login-content"><div className="login-lock"><LockKeyhole size={21} /></div>
-      <h1>登录本地控制台</h1><p>输入启动控制台时，终端中显示的控制台登录码。</p>
-      {boot ? <p className="loading-line" role="status"><LoaderCircle className="spin" size={17} /> 正在检查本机会话…</p> : <form onSubmit={async (e) => {
-        e.preventDefault();
-        if (!code.trim() || busy) return;
-        setBusy(true); setError("");
-        try {
-          const result = await api<Session>("/login", { body: { code } });
-          if (result.csrf) start(result.csrf);
-          else throw new Error("未获得本地会话。");
-        } catch (reason) { setError(messageOf(reason)); setBusy(false); }
-      }}>
-        <label className="field">控制台登录码<input type="password" autoComplete="off" spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} disabled={busy} placeholder="粘贴终端输出的登录码" maxLength={100} /></label>
-        {(error || failure) && <ErrorLine>{error || failure}</ErrorLine>}
-        <Button type="submit" variant="primary" icon={ArrowRight} busy={busy} disabled={!code.trim()}>登录控制台</Button>
-      </form>}
-    </div><footer><Command size={15} /> 仅限本机访问</footer></main>
-  </div>;
 }
 
 function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): void; theme: Theme; setTheme(value: Theme): void }) {
@@ -102,9 +80,15 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
       await live.refresh();
     }
   };
-  const logout = async () => {
-    await api("/logout", { body: {}, csrf });
-    expired();
+  const sendRouter: SendRouterMessage = async (body) => {
+    try {
+      const result = await api<RouterResult>("/router/message", { body, csrf });
+      if (result.action === "execute") void live.refresh();
+      return result;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) expired();
+      throw error;
+    }
   };
   const writeDisabled = online !== true || !!live.error;
   const pid = route.page.id;
@@ -137,8 +121,8 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
       </header>
       <main className="content" id="main-content">
         {live.error && <ErrorLine>{live.error}{state && ` 当前显示 ${fmtDate(state.now, state.timezone, "full")} 的快照。`}</ErrorLine>}
-        {pid === "settings" ? <Settings live={live} logout={logout} /> : state ? <>
-          {pid === "overview" && <Dashboard state={state} />}
+        {pid === "settings" ? <Settings live={live} /> : state ? <>
+          {pid === "overview" && <Dashboard state={state} sendRouter={sendRouter} />}
           {pid === "runs" && <Runs key={live.generation} state={state} query={route.query} navigate={navigate} />}
           {pid === "rules" && <Rules state={state} name={route.detail} close={() => navigate("#rules")} act={write} choose={setAction}
             disabled={writeDisabled} resumed={resumed} setResumed={(name, pause) => setResumed((previous) => new Map(previous).set(name, pause))} />}
@@ -150,6 +134,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
             disabled={writeDisabled} />}
         </> : <>
           <Heading title={route.page.name} description="连接本机 Agent Autoloop 中台。" />
+          {pid === "overview" && <RouterPanel state={null} send={sendRouter} />}
           <div className="panel">{live.error ? <Empty title="暂时无法读取中台" icon={Server}><Button icon={RefreshCw} onClick={() => void live.refresh()} busy={live.refreshing}>重新连接</Button></Empty>
             : <Empty title="正在加载中台状态" icon={LoaderCircle}>正在读取当前快照…</Empty>}</div>
         </>}
@@ -164,9 +149,13 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
 function App() {
   const [theme, setTheme] = useState<Theme>(() => localStorage.getItem("autoloop-theme") === "light" ? "light" : "dark");
   const [csrf, setCsrf] = useState("");
-  const [boot, setBoot] = useState(true);
   const [failure, setFailure] = useState("");
-  const expired = useCallback(() => { setCsrf(""); setFailure(""); }, []);
+  const [attempt, setAttempt] = useState(0);
+  const expired = useCallback(() => {
+    setCsrf("");
+    setFailure("");
+    setAttempt((value) => value + 1);
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("autoloop-theme", theme);
@@ -174,12 +163,16 @@ function App() {
   useEffect(() => {
     const controller = new AbortController();
     void api<Session>("/session", { signal: controller.signal }).then((session) => {
-      if (session.authenticated && session.csrf) setCsrf(session.csrf);
-    }).catch((reason) => { if (!controller.signal.aborted) setFailure(messageOf(reason)); })
-      .finally(() => { if (!controller.signal.aborted) setBoot(false); });
+      if (typeof session.csrf !== "string" || !session.csrf) throw new Error("无法打开本机会话，请重启 Web 控制台。");
+      setCsrf(session.csrf);
+    }).catch((reason) => { if (!controller.signal.aborted) setFailure(messageOf(reason)); });
     return () => controller.abort();
-  }, []);
-  return csrf ? <Shell csrf={csrf} expired={expired} theme={theme} setTheme={setTheme} /> : <Login start={setCsrf} boot={boot} failure={failure} />;
+  }, [attempt]);
+  if (csrf) return <Shell csrf={csrf} expired={expired} theme={theme} setTheme={setTheme} />;
+  return <main className="session-entry">
+    {failure ? <><ErrorLine>{failure}</ErrorLine><Button icon={RefreshCw} onClick={expired}>重新连接</Button></>
+      : <p role="status" className="loading-line"><LoaderCircle className="spin" size={17} /> 正在连接本地控制台…</p>}
+  </main>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

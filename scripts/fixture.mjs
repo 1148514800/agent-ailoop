@@ -17,6 +17,7 @@ export async function fixture(home) {
     agents: {
       codex: { name: "Codex", use: "codex", worker: "studio-mac" },
       claude: { name: "Claude Code", use: "claude", worker: "studio-mac" },
+      router: { name: "Router 测试 Agent", use: "command", worker: "router-worker", command: ["node", "--version"] },
       runner: { name: "巡检脚本", use: "command", worker: "ops-runner", command: ["node", "-e", "process.exit(0)"] },
     },
     channels: { terminal: { name: "测试通道" } },
@@ -24,6 +25,7 @@ export async function fixture(home) {
       eventRule("知识库同步", "codex", "docs.changed"),
       eventRule("客户反馈分流", "claude", "feedback.new"),
       eventRule("服务健康检查", "runner", "service.check"),
+      eventRule("ai-router", "router", "router.task.*"),
       cronRule("每日运营简报", "claude", "0 9 * * *"),
       cronRule("项目周报", "codex", "0 10 * * 1"),
     ],
@@ -34,6 +36,7 @@ export async function fixture(home) {
   const worker = runtime.addKey("worker", "studio-mac");
   const local = runtime.addKey("source", "local");
   const channel = runtime.addKey("channel", "terminal");
+  const routerWorker = runtime.addKey("worker", "router-worker");
   const timer = (offset) => new Date(Date.now() + offset).toISOString();
   const historical = Date.now() - 3 * 86_400_000;
   for (let i = 1; i <= 63; i++) {
@@ -56,7 +59,7 @@ export async function fixture(home) {
   const disconnect = () => { for (const stream of streams) stream.destroy(); };
   await once(hub, "listening");
   const url = "http://127.0.0.1:" + hub.address().port;
-  await writeFile(join(home, "config.json"), JSON.stringify({ url, owner, worker: { key: worker }, source: { key: local } }), { mode: 0o600 });
+  await writeFile(join(home, "config.json"), JSON.stringify({ url, owner, worker: { key: worker }, source: { name: "local", key: local } }), { mode: 0o600 });
 
   async function call(path, method = "GET", key = owner, body) {
     const res = await fetch(url + path, {
@@ -110,5 +113,5 @@ export async function fixture(home) {
     await stopped;
     runtime.db.close();
   };
-  return { url, emit, claim, finish, state, close, disconnect, running };
+  return { url, emit, claim, finish, state, close, disconnect, running, claimRouter: () => claim([], routerWorker) };
 }

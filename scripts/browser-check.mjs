@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:http";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import { fixture } from "./fixture.mjs";
 const home = await mkdtemp(join(tmpdir(), "autoloop-console-"));
 const screenshots = join(import.meta.dirname, "../docs/screenshots");
 const shot = process.argv.includes("--screenshots");
-let hub, server, browser;
+let hub, server, browser, model;
 const dispose = async () => {
   await browser?.close();
   if (server && server.exitCode === null && server.signalCode === null) {
@@ -19,6 +20,12 @@ const dispose = async () => {
     await stopped;
   }
   await hub?.close();
+  if (model?.listening) {
+    const stopped = once(model, "close");
+    model.close();
+    model.closeAllConnections();
+    await stopped;
+  }
   await rm(home, { recursive: true, force: true });
 };
 process.once("SIGINT", () => void dispose().finally(() => process.exit(130)));
@@ -27,7 +34,11 @@ process.once("SIGTERM", () => void dispose().finally(() => process.exit(143)));
 async function start() {
   server = spawn(process.execPath, ["server/main.ts"], {
     cwd: join(import.meta.dirname, ".."),
-    env: { ...process.env, AGENT_AUTOLOOP_HOME: home, AUTOLOOP_CONSOLE_PORT: "0", AUTOLOOP_HUB_URL: "" },
+    env: {
+      ...process.env, AGENT_AUTOLOOP_HOME: home, AUTOLOOP_CONSOLE_PORT: "0", AUTOLOOP_HUB_URL: "",
+      AUTOLOOP_ROUTER_ENABLED: "true", AUTOLOOP_ROUTER_BASE_URL: "http://127.0.0.1:" + model.address().port + "/v1",
+      AUTOLOOP_ROUTER_API_KEY: "browser-mock-key", AUTOLOOP_ROUTER_MODEL: "fixture-model",
+    },
     stdio: ["ignore", "pipe", "inherit"],
   });
   return new Promise((resolve, reject) => {
@@ -40,16 +51,13 @@ async function start() {
     child.stdout.on("data", (data) => {
       lines += data;
       const url = lines.match(/本地控制台 (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
-      const code = lines.match(/控制台登录码 ([\w-]+)\r?\n/)?.[1];
-      if (url && code) { clearTimeout(timeout); resolve({ url, code }); }
+      if (url) { clearTimeout(timeout); resolve(url); }
     });
   });
 }
 
-async function login(page, address) {
-  await page.goto(address.url);
-  await page.getByLabel("控制台登录码").fill(address.code);
-  await page.getByRole("button", { name: "登录控制台" }).click();
+async function openConsole(page, address) {
+  await page.goto(address);
   await page.getByRole("heading", { name: "运行总览" }).waitFor();
   await page.getByText("中台在线", { exact: true }).waitFor();
 }
@@ -61,6 +69,16 @@ const noOverflow = async (page) => assert.equal(await page.evaluate(() => docume
 try {
   if (shot) await mkdir(screenshots, { recursive: true });
   hub = await fixture(home);
+  model = createServer(async (request, response) => {
+    let text = "";
+    for await (const chunk of request) text += chunk;
+    const message = JSON.parse(text).messages[1].content;
+    const result = message === "你好"
+      ? { action: "reply", needs_plan: false, answer: "你好，有什么可以帮你？" }
+      : { action: "execute", needs_plan: message.includes("重构"), answer: "" };
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));
+  });
+  await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));
   const address = await start();
   browser = await chromium.launch(process.env.AUTOLOOP_BROWSER_CHANNEL ? { channel: process.env.AUTOLOOP_BROWSER_CHANNEL } : {});
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId: "Asia/Shanghai" });
@@ -69,7 +87,7 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (entry) => { if (/Content Security Policy/.test(entry.text())) errors.push(entry.text()); });
-  await login(page, address);
+  await openConsole(page, address);
   await page.getByText("知识库同步", { exact: true }).first().waitFor();
   await page.getByText("中台在线", { exact: true }).waitFor();
   assert.equal(await page.getByText("1 轮缺失", { exact: true }).count(), 2);
@@ -99,7 +117,7 @@ try {
 
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const phone = await mobile.newPage();
-  await login(phone, address);
+  await openConsole(phone, address);
   await phone.getByRole("button", { name: "打开导航" }).click();
   await phone.getByRole("navigation").getByRole("link", { name: "审批中心" }).click();
   await phone.getByRole("heading", { name: "确认客户反馈的处理范围" }).waitFor();
@@ -171,6 +189,34 @@ try {
   assert.ok(seqAfter > seqBefore);
   assert.equal(await page.locator(".feed").getByText("#" + seqAfter, { exact: true }).count(), 1);
 
+  await navigate("运行总览");
+  const routerPanel = page.locator(".router-panel");
+  const sendRouter = async (message) => {
+    await routerPanel.getByLabel("消息").fill(message);
+    await routerPanel.getByRole("button", { name: "发送", exact: true }).click();
+  };
+  const originalRuns = (await hub.state()).runs.filter((run) => run.rule === "ai-router").length;
+  await sendRouter("你好");
+  await routerPanel.getByText("你好，有什么可以帮你？", { exact: true }).waitFor();
+  assert.equal((await hub.state()).runs.filter((run) => run.rule === "ai-router").length, originalRuns);
+  await sendRouter("帮我修改 README 中的错别字");
+  await routerPanel.getByText("直接执行", { exact: true }).waitFor();
+  await routerPanel.getByText("排队中", { exact: true }).waitFor();
+  const simple = (await hub.claimRouter()).job;
+  assert.equal(simple.context.events[0].type, "router.task.direct");
+  assert.equal(simple.context.events[0].detail, "帮我修改 README 中的错别字");
+  await routerPanel.getByText("执行中", { exact: true }).waitFor();
+  await hub.finish(simple, { outcome: "done", summary: "README 错别字已修正。" });
+  await routerPanel.getByText("README 错别字已修正。", { exact: true }).waitFor();
+  await routerPanel.getByRole("link", { name: "查看第 " + simple.run + " 轮" }).click();
+  await page.getByRole("heading", { name: "执行时间线" }).waitFor();
+  await page.getByRole("button", { name: "关闭详情" }).click();
+  await navigate("运行总览");
+  await sendRouter("帮我重构调度模块并完成相关测试");
+  await routerPanel.getByText("建议先规划", { exact: true }).waitFor();
+  const plan = (await hub.claimRouter()).job;
+  assert.equal(plan.context.events[0].type, "router.task.plan");
+
   await navigate("Agent");
   await page.getByRole("heading", { name: "已配置 Agent" }).waitFor();
   assert.ok(await page.getByRole("row", { name: /巡检脚本.*离线/ }).count());
@@ -186,8 +232,11 @@ try {
   await page.getByRole("button", { name: "刷新状态" }).click();
   await page.locator(".topbar").getByText("中台离线", { exact: true }).waitFor();
   await page.getByRole("alert").getByText(/当前显示.*快照/).waitFor();
-  await page.getByRole("button", { name: "退出登录" }).click();
-  await page.getByRole("heading", { name: "登录本地控制台" }).waitFor();
+  await context.clearCookies();
+  const restored = page.waitForResponse((response) => response.url().endsWith("/api/session") && response.ok());
+  await page.getByRole("button", { name: "刷新状态" }).click();
+  await restored;
+  await page.getByRole("heading", { name: "运行设置" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("通过。临时真实中台 + Chromium 验证了登录与退出、审批选项 0 和自定义回复、通知结案、历史游标、三项筛选、真实时间线、停止确认、暂停/恢复/补跑/手动触发、SSE 断线恢复、中台离线、深浅主题与手机审批。");
+  console.log("通过。临时真实中台 + Chromium 验证了直接访问与自动恢复会话、审批选项 0 和自定义回复、通知结案、历史游标、三项筛选、真实时间线、停止确认、暂停/恢复/补跑/手动触发、SSE 断线恢复、中台离线、深浅主题、手机审批和 AI Router 三条路径。");
 } finally { await dispose(); }

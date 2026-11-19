@@ -139,19 +139,11 @@ export function Agents({ state }: { state: State }) {
   </>;
 }
 
-export function Settings({ live, logout }: { live: Live; logout(): Promise<void> }) {
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState("");
+export function Settings({ live }: { live: Live }) {
   const { state, online, health, stream, lastError } = live;
   const tz = state?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   return <>
-    <Heading title="运行设置" description="查看本机连接、运行版本和配置摘要。">
-      <Button icon={ShieldCheck} busy={busy} onClick={async () => {
-        setBusy(true); setFailure("");
-        try { await logout(); } catch (error) { setFailure(error instanceof Error ? error.message : "退出失败。"); setBusy(false); }
-      }}>退出登录</Button>
-    </Heading>
-    {failure && <p className="notice error" role="alert">{failure}</p>}
+    <Heading title="运行设置" description="查看本机连接、运行版本和配置摘要。" />
     <div className="settings-grid">
       <Panel title="连接诊断" icon={Server} className="settings-panel" extra={<Badge dot tone={online ? "green" : "neutral"}>{online ? "中台在线" : online === null ? "检测中" : "中台离线"}</Badge>}>
         <Details items={[
@@ -163,7 +155,7 @@ export function Settings({ live, logout }: { live: Live; logout(): Promise<void>
         ]} />
       </Panel>
       <Panel title="本机访问" icon={ShieldCheck} className="settings-panel">
-        <Details items={[["控制台地址", <code>{location.origin}</code>], ["访问范围", "本机回环地址"], ["登录状态", "本机会话"], ["配置权限", "只读"]]} />
+        <Details items={[["控制台地址", <code>{location.origin}</code>], ["访问范围", "本机回环地址"], ["配置权限", "只读"]]} />
       </Panel>
       <Panel title="配置摘要" icon={Settings2} className="settings-panel">
         {state ? <ul className="summary-list">

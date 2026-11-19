@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,6 +5,8 @@ import type { AddressInfo } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadHub } from "./hub.ts";
 import { createConsole } from "./proxy.ts";
+import { createRouter } from "./router-dispatch.ts";
+import { localRouterConfig } from "./router.ts";
 
 const root = join(import.meta.dirname, "..");
 const dev = process.argv.includes("--dev");
@@ -42,19 +43,18 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
   else createReadStream(file).on("error", () => res.destroy()).pipe(res);
 }
 
-const code = randomBytes(18).toString("base64url");
 const portText = process.env.AUTOLOOP_CONSOLE_PORT ?? "4175";
 const port = Number(portText);
 if (!/^\d+$/.test(portText) || !Number.isInteger(port) || port > 65535) {
   console.error("AUTOLOOP_CONSOLE_PORT 必须在 0 到 65535 之间。");
   process.exit(1);
 }
-const server = createConsole({ code, loadHub, frontend: serve });
+const router = createRouter({ config: () => localRouterConfig(root), loadHub });
+const server = createConsole({ loadHub, router, frontend: serve });
 server.on("error", (error: NodeJS.ErrnoException) => {
   console.error(error.code === "EADDRINUSE" ? "端口已占用，请指定其他 AUTOLOOP_CONSOLE_PORT。" : "无法启动本地控制台。");
   process.exit(1);
 });
 server.listen(port, "127.0.0.1", () => {
   console.log("本地控制台 http://127.0.0.1:" + (server.address() as AddressInfo).port);
-  console.log("控制台登录码 " + code);
 });

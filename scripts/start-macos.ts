@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { lstat, readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadHub } from "../server/hub.ts";
-import { bundledHub, consolePort, exec, logs, root, services, startService } from "./macos-services.ts";
+import { bundledHub, consolePort, exec, root, services, startService } from "./macos-services.ts";
 import type { Availability } from "./macos-services.ts";
 
-async function probe(url: string, matches: (res: Response) => Promise<boolean>): Promise<Availability> {
+async function probe(url: string, matches: (res: Response) => boolean | Promise<boolean>, method = "GET"): Promise<Availability> {
   try {
-    const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(1500) });
+    const res = await fetch(url, { method, redirect: "manual", signal: AbortSignal.timeout(1500) });
     return res.ok && await matches(res) ? "ready" : "other";
   } catch (error) {
     return (error as { cause?: { code?: string } }).cause?.code === "ECONNREFUSED" ? "down" : "other";
@@ -16,7 +16,7 @@ async function probe(url: string, matches: (res: Response) => Promise<boolean>):
 }
 
 async function consoleAt(url: string): Promise<Availability> {
-  const session = await probe(url + "api/session", async (res) => (await res.json())?.authenticated === false);
+  const session = await probe(url + "api/session", (res) => res.status === 204, "HEAD");
   if (session !== "ready") return session;
   return probe(url, async (res) => (await res.text()).includes("<title>Autoloop · 管理控制台</title>"));
 }
@@ -101,31 +101,12 @@ async function buildConsole() {
   npm(["run", "build"], "构建控制台失败。");
 }
 
-async function showLoginCode(port: number) {
-  try {
-    const { stdout } = await exec("/usr/sbin/lsof", ["-tnP", "-iTCP@127.0.0.1:" + port, "-sTCP:LISTEN"]);
-    const pid = stdout.trim();
-    if (/^[1-9]\d*$/.test(pid)) {
-      const file = join(logs, "console-" + port + "-" + pid + ".log");
-      const info = await lstat(file);
-      if (info.isFile() && info.uid === process.getuid?.() && (info.mode & 0o077) === 0) {
-        const code = (await readFile(file, "utf8")).match(/^控制台登录码 ([\w-]{24})$/m)?.[1];
-        if (code) {
-          console.log("控制台登录码 " + code);
-          return;
-        }
-      }
-    }
-  } catch { /* A console started independently has no launcher log. */ }
-  console.log("如需登录，请使用该控制台启动时显示的登录码。");
-}
-
 async function main() {
   const port = consolePort();
   const consoleUrl = "http://127.0.0.1:" + port + "/";
   const checkConsole = () => consoleAt(consoleUrl);
   const consoleStatus = await checkConsole();
-  if (consoleStatus === "other") throw new Error("控制台端口 " + port + " 已被占用，或当前服务无法识别。可用 AUTOLOOP_CONSOLE_PORT 指定其他端口。");
+  if (consoleStatus === "other") throw new Error("控制台端口 " + port + " 已被占用或正在运行旧版本。请关闭对应进程后重试，或用 AUTOLOOP_CONSOLE_PORT 指定其他端口。");
   const hub = await configuredHub(port);
   const managed = services(port);
   const checkHub = () => probe(hub.url + "/healthz", async (res) => {
@@ -151,7 +132,6 @@ async function main() {
   }
 
   console.log("控制台地址 " + consoleUrl);
-  await showLoginCode(port);
   await exec("open", [consoleUrl]).catch(() => {
     throw new Error("无法打开默认浏览器。请在浏览器中打开上面的控制台地址。");
   });

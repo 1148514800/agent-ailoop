@@ -6,6 +6,8 @@ import { once } from "node:events";
 import { Buffer } from "node:buffer";
 import { redact, safeFact } from "./hub.ts";
 import type { Hub } from "./hub.ts";
+import { RouterError } from "./router.ts";
+import type { RouterHandler } from "./router-dispatch.ts";
 
 const COOKIE = "autoloop_console";
 const SESSION_AGE = 12 * 60 * 60;
@@ -119,13 +121,11 @@ async function pipeFacts(upstream: Response, res: ServerResponse, signal: AbortS
 }
 
 export function createConsole(options: {
-  code: string; loadHub(): Promise<Hub>;
+  loadHub(): Promise<Hub>; router?: RouterHandler;
   frontend?(req: IncomingMessage, res: ServerResponse): void | Promise<void>;
 }) {
   const sessions = new Map<string, Session>();
-  let failures = 0;
-  let retryAt = 0;
-  const cookie = (id: string, age: number) => COOKIE + "=" + id + "; Path=/; Max-Age=" + age + "; HttpOnly; SameSite=Strict";
+  const cookie = (id: string) => COOKIE + "=" + id + "; Path=/; Max-Age=" + SESSION_AGE + "; HttpOnly; SameSite=Strict";
   const remove = (id: string) => { sessions.get(id)?.stop.abort(); sessions.delete(id); };
   const server = createServer(async (req, res) => {
     res.setHeader("cache-control", "no-store");
@@ -152,35 +152,34 @@ export function createConsole(options: {
       const now = Date.now();
       const session = sessions.get(id);
       if (session && session.until <= now) remove(id);
-      if (req.method === "GET" && url.pathname === "/api/session") {
-        return json(res, 200, { authenticated: sessions.has(id), csrf: sessions.has(id) ? session?.csrf : undefined });
-      }
-      if (req.method === "POST" && url.pathname === "/api/login") {
-        if (now >= retryAt) { retryAt = now + 60_000; failures = 0; }
-        if (failures >= 10) throw new RequestError(429, "尝试次数过多，请稍后再试。");
-        const { code } = await readObject(req);
-        if (typeof code !== "string" || !equal(code.trim(), options.code)) {
-          failures++;
-          throw new RequestError(401, "登录码不正确，请核对终端输出。");
+      if (url.pathname === "/api/session" && !url.search) {
+        if (req.method === "HEAD") return void res.writeHead(204).end();
+        if (req.method === "GET") {
+          if (session && sessions.has(id)) return json(res, 200, { csrf: session.csrf });
+          for (const [old, entry] of sessions) if (entry.until <= now) remove(old);
+          if (sessions.size >= 32) remove(sessions.keys().next().value!);
+          const fresh = token();
+          const csrf = token();
+          sessions.set(fresh, { csrf, until: now + SESSION_AGE * 1000, stop: new AbortController() });
+          res.setHeader("set-cookie", cookie(fresh));
+          return json(res, 200, { csrf });
         }
-        for (const [old, entry] of sessions) if (entry.until <= now) remove(old);
-        remove(id);
-        if (sessions.size >= 32) remove(sessions.keys().next().value!);
-        const fresh = token();
-        const csrf = token();
-        sessions.set(fresh, { csrf, until: now + SESSION_AGE * 1000, stop: new AbortController() });
-        res.setHeader("set-cookie", cookie(fresh, SESSION_AGE));
-        return json(res, 200, { authenticated: true, csrf });
       }
-      if (!session || !sessions.has(id)) throw new RequestError(401, "请先登录本地控制台。");
+      if (!session || !sessions.has(id)) throw new RequestError(401, "本机会话已失效，请刷新页面。");
       if (req.method === "POST") {
         const csrf = req.headers["x-console-csrf"];
         if (typeof csrf !== "string" || !equal(csrf, session.csrf)) throw new RequestError(403, "页面验证已失效，请刷新后重试。");
-        if (url.pathname === "/api/logout") {
-          remove(id);
-          res.setHeader("set-cookie", cookie("", 0));
-          return json(res, 200, { ok: true });
-        }
+      }
+      if (req.method === "POST" && url.pathname === "/api/router/message" && !url.search) {
+        if (!options.router) throw new RouterError(503, "控制台未加载 AI Router。");
+        const body = await readObject(req);
+        const gone = new AbortController();
+        res.once("close", () => gone.abort());
+        const signal = AbortSignal.any([gone.signal, session.stop.signal,
+          AbortSignal.timeout(Math.max(1, session.until - Date.now()))]);
+        const result = await options.router(body, signal);
+        if (!res.destroyed) json(res, 200, result);
+        return;
       }
       const target = route(req.method, url, req);
       if (!target) throw new RequestError(404, "控制台没有开放这个接口。");
@@ -224,7 +223,8 @@ export function createConsole(options: {
     } catch (error) {
       if (res.destroyed || res.headersSent) return;
       if (!req.complete) res.setHeader("connection", "close");
-      json(res, error instanceof RequestError ? error.status : 500, { error: error instanceof RequestError ? error.message : "控制台暂时无法处理请求。" });
+      const safe = error instanceof RequestError || error instanceof RouterError;
+      json(res, safe ? error.status : 500, { error: safe ? error.message : "控制台暂时无法处理请求。" });
     }
   });
   return server;

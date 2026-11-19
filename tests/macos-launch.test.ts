@@ -36,7 +36,7 @@ async function setup(t: TestContext, configured = true) {
   const logs = join(home, "Library", "Logs", "Agent Autoloop Console");
   const hubBin = join(workspace, "agent-autoloop", "bin");
   await Promise.all([bin, hubHome, join(workspace, "scripts"), hubBin].map((path) => mkdir(path, { recursive: true })));
-  for (const part of ["启动控制台.command", "关闭控制台.command", "package-lock.json", "scripts/macos-command.sh", "scripts/macos-services.ts", "scripts/start-macos.ts", "scripts/stop-macos.ts", "scripts/hub.ts", "server"]) {
+  for (const part of ["启动控制台.command", "关闭控制台.command", "package-lock.json", "scripts/macos-command.sh", "scripts/macos-services.ts", "scripts/start-macos.ts", "scripts/stop-macos.ts", "scripts/hub.ts", "server", "shared", "agent-autoloop/kernel", "agent-autoloop/protocol"]) {
     await cp(join(root, part), join(workspace, part), { recursive: true });
   }
   const config = JSON.stringify({
@@ -106,11 +106,9 @@ test("the macOS launcher initializes once and closes only its own services", { s
     const { stdout: first } = await fixture.start("1\n" + fixture.hubPort + "\n");
     const pids = await Promise.all([fixture.pidAt(fixture.hubPort), fixture.pidAt(fixture.consolePort)]);
     assert.ok(pids.every(Boolean));
-    const readCode = (lines: string) => lines.match(/控制台登录码 ([A-Za-z0-9_-]{24})/)?.[1];
-    const code = readCode(first);
-    assert.ok(code);
+    assert.doesNotMatch(first, /登录码/);
     const { stdout: second } = await fixture.start();
-    assert.ok(readCode(second) === code);
+    assert.doesNotMatch(second, /登录码/);
     assert.deepEqual(await Promise.all([fixture.pidAt(fixture.hubPort), fixture.pidAt(fixture.consolePort)]), pids);
     assert.deepEqual((await readFile(fixture.counters, "utf8")).trim().split("\n"), ["init", "ci", "run", "hub"]);
     assert.deepEqual((await readFile(fixture.opens, "utf8")).trim().split("\n"),
@@ -146,8 +144,10 @@ test("the macOS launcher leaves an unrelated HTTP service alone", { skip: !macOS
 test("the macOS launcher reuses and leaves externally started services running", { skip: !macOS, timeout: 20_000 }, async (t) => {
   const fixture = await setup(t);
   const hub = createServer((_req, res) => res.end(JSON.stringify({ ok: true, commit: "external" })));
-  const web = createServer((req, res) => res.end(req.url === "/api/session"
-    ? JSON.stringify({ authenticated: false }) : "<title>Autoloop · 管理控制台</title>"));
+  const web = createServer((req, res) => {
+    if (req.method === "HEAD" && req.url === "/api/session") return res.writeHead(204).end();
+    res.end("<title>Autoloop · 管理控制台</title>");
+  });
   try {
     await Promise.all([hub, web].map((server, index) => new Promise<void>((resolve) => {
       server.listen([fixture.hubPort, fixture.consolePort][index], "127.0.0.1", resolve);

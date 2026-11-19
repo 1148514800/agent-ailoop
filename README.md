@@ -15,7 +15,7 @@
 
 在 Finder 双击项目根目录的 [启动控制台.command](启动控制台.command)。新电脑首次启动时，按提示选择 Agent 和中台端口。配置由仓库内的 CLI 生成。已有配置会直接使用。脚本会启动尚未运行的中台和 Web 控制台，等两者就绪后打开默认浏览器。第一次启动控制台会安装依赖并构建页面。已运行的服务直接复用，关闭启动终端后服务仍在后台运行。
 
-浏览器需要登录时，输入启动窗口显示的控制台登录码。由此脚本启动的控制台会把登录码保留在本人的私有日志目录 `~/Library/Logs/Agent Autoloop Console`，重复双击时可以再次看到。通过其他方式启动的控制台继续使用它原先显示的登录码。
+浏览器打开本机地址后直接进入控制台。启动日志位于 `~/Library/Logs/Agent Autoloop Console`。
 
 如果 Finder 提示没有执行权限，在项目目录运行 `chmod +x ./启动控制台.command ./关闭控制台.command`。启动器使用固定端口，默认 `4175`。如果端口被其他程序占用，可以用 `AUTOLOOP_CONSOLE_PORT` 指定另一个端口。
 
@@ -43,7 +43,7 @@ npm run build
 npm start
 ```
 
-打开终端显示的本机地址，默认是 [http://127.0.0.1:4175](http://127.0.0.1:4175)。输入同一终端显示的**控制台登录码**。登录后可在「运行设置」检查中台状态。控制台登录码每次启动重新生成，浏览器会话最长 12 小时。终端可以保持打开，按 Ctrl+C 退出控制台。
+打开终端显示的本机地址，默认是 [http://127.0.0.1:4175](http://127.0.0.1:4175)。在「运行设置」可以查看中台状态。按 Ctrl+C 退出当前终端启动的控制台。
 
 | 系统 | 默认读取的中台配置 |
 | --- | --- |
@@ -72,6 +72,34 @@ $env:AUTOLOOP_CONSOLE_PORT = "4180"
 npm start
 ```
 
+## AI Router v0.1
+
+在「运行总览」输入消息。无需工具的问题由 Router 直接回答。需要读取项目、改代码或运行测试时，Router 把任务交给中台。复杂任务会标记为「建议先规划」，规划和执行都由配置的 Agent 完成。
+
+### 配置
+
+1. 把 [.env.example](.env.example) 复制为 `.env.local`，填入实际模型服务。默认关闭 Router。服务端从项目根目录读取此文件，Finder 双击启动同样生效。显式传入的同名环境变量优先。
+
+```dotenv
+AUTOLOOP_ROUTER_ENABLED=true
+AUTOLOOP_ROUTER_BASE_URL=https://你的模型服务/v1
+AUTOLOOP_ROUTER_API_KEY=你的服务端密钥
+AUTOLOOP_ROUTER_MODEL=你的模型名称
+```
+
+2. 合并 [ai-router 规则示例](docs/ai-router.rule.json) 到本机 `rules.json` 的 `rules` 数组。用 `config.json` 的 `source.name` 替换示例的来源，并确认它在 `rules.json` 的 `sources` 中登记。把 `to` 指向现有 Agent，把 `cwd` 改成可信项目目录。保留 `parallel: 1` 让每个请求使用独立事项。其他事件规则应避免用通配符同时匹配这两种 Router 事件。
+3. 执行 `npm run hub -- check` 校验本机规则。首次安装新版时重新构建并启动 Web 控制台。macOS 可关闭由启动器管理的旧实例后双击启动。
+
+### API 与数据流
+
+- `POST /api/router/message` 接收 `{"requestId":"UUID","message":"你好"}`，需要本机浏览器会话、同源请求和 `X-Console-CSRF`。输入最多 4000 个 Unicode 字符，仍受控制台 JSON 请求体大小限制。
+- Node 用原生 `fetch` 调用模型服务的 `/chat/completions`。模型只收到系统提示词和本次文字。远程服务使用 HTTPS，本机回环地址可用 HTTP。请求超时为 15 秒，使用兼容 `max_tokens` 的模型，输出限制为 480 Token。模型错误或格式不合规时，页面会报错且任务不会提交。
+- 直接回答返回 `{ action: "reply", needs_plan: false, answer }`。执行时，Node 用 `config.json` 的 Source 凭据发 `POST /v1/events`。简单任务使用 `router.task.direct`，复杂任务使用 `router.task.plan`。原文字在事件的 `detail` 中，由 Worker 写入 `context.json`。
+- 任务提交结果包含 `eventId`、`status` 和关联的 `run`。状态可能为 `submitted`、`paused` 或 `unmatched`。关联轮次由 `GET /v1/events/:id` 查询；页面沿用现有状态快照和事件流显示排队、执行、结果和任务详情，审批继续走原审批中心。
+- 调用失败重试时使用相同 UUID。控制台短期复用路由结果，中台按来源和事件 ID 持久去重。重启控制台后，同一请求可能再次调用模型。密钥只留在本机服务端，Router 的模型 Key 不进入浏览器构建。
+
+本机可依次输入「你好」「帮我修改 README 中的一个错别字」「帮我重构调度模块并完成相关测试」。后两项会在规则配置的项目内创建真实任务。在试验目录验收时，使用独立中台配置、可信 Agent 与试验规则。
+
 ## 数据与操作
 
 | 页面 | 中台接口及口径 |
@@ -88,9 +116,9 @@ npm start
 
 ## 本地安全边界
 
-浏览器只访问控制台的同源 API。Node 从本机 `config.json` 获取本人密钥，只随固定白名单请求发送给回环中台，禁止上游重定向。控制台用短期内存会话、HttpOnly 和 SameSite=Strict Cookie、精确 Host 和 Origin 校验及写操作 CSRF 校验保护本机访问。代理只读配置文件，事实只转发展示用字段。浏览器只在本地存储主题偏好。
+浏览器只访问控制台的同源 API。Node 从本机 `config.json` 获取本人密钥，只随固定白名单请求发送给回环中台，禁止上游重定向。本机浏览器会自动建立短期会话。控制台使用 HttpOnly、SameSite=Strict Cookie，核对 Host 和 Origin，并对写操作执行 CSRF 校验。代理只读配置文件，事实只转发展示用字段。浏览器只在本地存储主题偏好。
 
-控制台面向可信本机环境，默认只监听 `127.0.0.1`。局域网或远程部署需要单独实现 HTTPS、真正的用户身份验证和授权，并按新域名重设 Host、Origin 和 Cookie 策略。应保护可读取中台配置的系统账户，以及可能与该回环主机共享浏览器 Cookie 的本地服务。
+控制台信任能访问本机回环接口的用户与进程，只监听 `127.0.0.1`。局域网或远程部署需要单独实现 HTTPS、真正的用户身份验证和授权，并按新域名重设 Host、Origin 和 Cookie 策略。应保护可读取中台配置的系统账户，以及可能与该回环主机共享浏览器 Cookie 的本地服务。
 
 ## 验证
 
@@ -106,7 +134,7 @@ npm run test:browser -- --screenshots
 
 浏览器测试默认从本仓库的 `agent-autoloop/` 源码启动临时中台。可用 `AUTOLOOP_SOURCE` 指定源码路径，也可用 `AUTOLOOP_BROWSER_CHANNEL=chrome` 选择已安装的 Chrome。测试使用临时目录、随机端口和测试 Worker 请求，结束后退出进程并清理目录。截图只包含临时中台中的虚构资料。
 
-已在 macOS 上使用 Node.js 24.22.3 和 Chrome 验证。类型检查、生产构建、控制台自动化测试和真实 HTTP 浏览器验收均通过。浏览器验收覆盖零号审批选项、手机文字回复、通知结案、规则控制、轮次停止确认、历史分页及筛选、断线期间事件续读和中台离线状态。开发模式通过启动和认证拦截检查。测试 Worker 用协议上报领取与停止确认。
+已在 macOS 上使用 Node.js 24.22.3 和 Chrome 验证。类型检查、生产构建、控制台自动化测试和真实 HTTP 浏览器验收均通过。浏览器验收覆盖零号审批选项、手机文字回复、通知结案、规则控制、轮次停止确认、历史分页及筛选、断线期间事件续读和中台离线状态。开发模式通过启动和会话边界检查。测试 Worker 用协议上报领取与停止确认。
 
 - [运行总览](docs/screenshots/overview.png)
 - [桌面审批](docs/screenshots/approvals.png)

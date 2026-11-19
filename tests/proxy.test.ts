@@ -11,7 +11,7 @@ async function listen(server: Server) {
   return "http://127.0.0.1:" + (server.address() as AddressInfo).port;
 }
 
-test("local session and CSRF guard owner calls, including zero-based answers and cursor forwarding", async (t) => {
+test("a browser opens a local session without credentials and writes with CSRF, including zero-based answers and cursor forwarding", async (t) => {
   const calls: { url: string; method: string; body: unknown; key: string | undefined }[] = [];
   const hub = createServer(async (req, res) => {
     const body = [];
@@ -26,8 +26,7 @@ test("local session and CSRF guard owner calls, including zero-based answers and
   });
   const hubUrl = await listen(hub);
   t.after(() => hub.close());
-  const code = "the-console-code";
-  const proxy = createConsole({ code, loadHub: async () => ({ url: hubUrl, owner: "owner-testing-key", secrets: [] }) });
+  const proxy = createConsole({ loadHub: async () => ({ url: hubUrl, owner: "owner-testing-key", secrets: [] }) });
   const base = await listen(proxy);
   t.after(() => { proxy.close(); proxy.closeAllConnections(); });
 
@@ -35,7 +34,10 @@ test("local session and CSRF guard owner calls, including zero-based answers and
     method: "POST", headers: { origin: base, "content-type": "application/json", ...headers }, body: JSON.stringify(body),
   });
   assert.equal((await fetch(base + "/api/state")).status, 401);
-  assert.equal((await fetch(base + "/api/login", write({ code }, { origin: "https://elsewhere.invalid" }))).status, 403);
+  const foreign = await fetch(base + "/api/session", { headers: { origin: "https://elsewhere.invalid" } });
+  assert.equal(foreign.status, 403);
+  assert.equal(foreign.headers.get("set-cookie"), null);
+  assert.equal((await fetch(base + "/api/session", { headers: { "sec-fetch-site": "cross-site" } })).status, 403);
   const foreignHost = await new Promise<number | undefined>((resolve, reject) => {
     get(base + "/api/session", { headers: { host: "elsewhere.invalid" } }, (res) => {
       res.resume();
@@ -43,12 +45,18 @@ test("local session and CSRF guard owner calls, including zero-based answers and
     }).on("error", reject);
   });
   assert.equal(foreignHost, 403);
-  assert.equal((await fetch(base + "/api/login", write({ code: "wrong" }))).status, 401);
-  const session = await fetch(base + "/api/login", write({ code }));
+  const probe = await fetch(base + "/api/session", { method: "HEAD" });
+  assert.equal(probe.status, 204);
+  assert.equal(probe.headers.get("set-cookie"), null);
+  const session = await fetch(base + "/api/session");
   const cookie = session.headers.get("set-cookie")!.split(";")[0];
   assert.match(session.headers.get("set-cookie")!, /HttpOnly; SameSite=Strict/);
   const { csrf } = await session.json();
+  assert.equal(typeof csrf, "string");
   const headers = { cookie, "x-console-csrf": csrf };
+  const openedAgain = await fetch(base + "/api/session", { headers: { cookie } });
+  assert.deepEqual(await openedAgain.json(), { csrf });
+  assert.equal(openedAgain.headers.get("set-cookie"), null);
   const withCookie = { headers: { cookie } };
   assert.equal((await fetch(base + "/api/cards/56/answer", write({ choice: 0 }, { cookie }))).status, 403);
   assert.equal((await fetch(base + "/api/cards/56/answer", write({ choice: 0, by: "someone" }, headers))).status, 400);
@@ -68,6 +76,6 @@ test("local session and CSRF guard owner calls, including zero-based answers and
     ["/v1/stream?after=42", null, "Bearer owner-testing-key"],
   ]);
 
-  assert.equal((await fetch(base + "/api/logout", write({}, headers))).status, 200);
-  assert.equal((await fetch(base + "/api/state", withCookie)).status, 401);
+  assert.equal((await fetch(base + "/api/login", write({}, headers))).status, 404);
+  assert.equal((await fetch(base + "/api/logout", write({}, headers))).status, 404);
 });

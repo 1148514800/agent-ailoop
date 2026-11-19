@@ -303,15 +303,7 @@ dialog::backdrop { background: var(--overlay); }
 .settings-panel .summary-list small { white-space: normal; overflow-wrap: anywhere; }
 .loading-line { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
 
-.login-layout { min-height: 100dvh; display: grid; align-items: center; justify-items: center; padding: 20px; }
-.login-box { width: min(440px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 23px; box-shadow: 0 20px 57px #0003; }
-.login-content { padding: 24px 0; display: grid; gap: 9px; }
-.login-content h1 { font-size: 1.55rem; }
-.login-content p { color: var(--muted); }
-.login-content form { margin-top: 8px; display: grid; gap: 12px; }
-.login-lock { width: 38px; height: 38px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-bg); color: var(--accent); }
-.login-box footer { border-top: 1px solid var(--line); padding-top: 12px; color: var(--soft); }
-.login-box footer svg { margin-right: 4px; }
+.session-entry { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; }
 
 @media (max-width: 1250px) {
   :root { --side: 200px; --gap: 16px; }
@@ -366,3 +358,11 @@ dialog::backdrop { background: var(--overlay); }
   .tabs button { padding: 5px 8px; }
   .approval-footer { align-items: stretch; flex-direction: column; }
 }
+
+.router-form, .router-result { display: grid; gap: 10px; padding: 14px 16px; }
+.router-form textarea { min-height: 74px; }
+.router-actions, .router-result-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.router-actions { justify-content: space-between; }
+.router-result { border-top: 1px solid var(--line); }
+.router-result .button { justify-self: start; }
+.router-limit { color: var(--red); }
