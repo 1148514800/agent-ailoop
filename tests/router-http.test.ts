@@ -13,12 +13,13 @@ import { createConsole } from "../server/proxy.ts";
 import { loadHub } from "../server/hub.ts";
 import { createRouter } from "../server/router-dispatch.ts";
 import { routerConfig } from "../server/router.ts";
+import { hubClient } from "../agent-autoloop/protocol/client.ts";
 
 const home = await mkdtemp(join(tmpdir(), "autoloop-router-test-"));
 process.env.AGENT_AUTOLOOP_HOME = home;
 process.env.AGENT_AUTOLOOP_RULES = join(home, "rules.json");
 const rule = { name: "ai-router", when: { source: "workstation", types: ["router.task.*"] }, to: "lab", cwd: home, prompt: "测试。", parallel: 1 };
-const rules = { sources: { workstation: { name: "工作站" } }, agents: {
+const rules = { sources: { workstation: { name: "工作站" }, other: { name: "其他来源" } }, agents: {
   lab: { name: "试验", use: "command", command: ["node", "--version"], worker: "offline-worker" },
 }, channels: {}, rules: [rule] };
 await writeFile(process.env.AGENT_AUTOLOOP_RULES, JSON.stringify(rules));
@@ -98,7 +99,7 @@ test("direct replies and invalid model decisions do not create hub events", asyn
   assert.deepEqual(routerRuns(), []);
 });
 
-test("simple and complex requests use different event types and unique queued runs", async () => {
+test("simple and complex requests create independently deduplicated runs while the worker is offline", async () => {
   const requestId = randomUUID();
   const simple = await (await post("帮我修改 README 中的错别字", requestId)).json();
   const before = modelCalls;
@@ -112,6 +113,7 @@ test("simple and complex requests use different event types and unique queued ru
   assert.equal(simple.needs_plan, false);
   assert.equal(complex.needs_plan, true);
   assert.equal(simple.run.state, "queued");
+  assert.equal(complex.run.state, "queued");
   assert.notEqual(complex.eventId, simple.eventId);
   assert.notEqual(complex.run.id, simple.run.id);
   const runs = routerRuns();
@@ -119,34 +121,110 @@ test("simple and complex requests use different event types and unique queued ru
   const second = runs.find((run) => run.id === complex.run.id)!;
   assert.deepEqual([first.events[0].type, second.events[0].type], ["router.task.direct", "router.task.plan"]);
   assert.equal(first.events[0].subject, "task-" + requestId);
+  assert.equal(runs.length, 2);
   assert.equal((await post("另一条消息", requestId)).status, 409);
   assert.equal(state().agents[0].online, false);
 });
 
-test("a paused or unmatched event is recorded without claiming that work started", async () => {
+test("the registered worker can claim both Router runs and receives the planning event in its job", async () => {
+  const key = hubRuntime.addKey("worker", "offline-worker");
+  const worker = hubClient(hubUrl, key);
+  for (const [index, run] of [...routerRuns()].reverse().entries()) {
+    const { job } = await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true });
+    assert.equal(job.run, run.id);
+    assert.equal(job.context.events[0].type, index === 0 ? "router.task.direct" : "router.task.plan");
+    assert.equal(routerRuns().find(({ id }) => id === run.id)?.state, "claimed");
+    assert.equal(state().agents[0].online, true);
+    await worker.result(job.run, job.token, { outcome: "done", summary: "已验收领取" });
+  }
+});
+
+test("a paused event is recorded for replay without claiming that work started", async () => {
   hubRuntime.execute("pauseRule", ["ai-router", "owner", {}]);
   const paused = await (await post("修改 README")).json();
   assert.equal(paused.status, "paused");
   assert.equal(paused.run, null);
   assert.ok(paused.eventId > 0);
-  await writeFile(process.env.AGENT_AUTOLOOP_RULES!, JSON.stringify({ ...rules, rules: [] }));
-  hubRuntime.reloadRules();
-  const unmatched = await (await post("增加注释")).json();
-  assert.equal(unmatched.status, "unmatched");
-  assert.equal(unmatched.run, null);
-  assert.ok(unmatched.eventId > 0);
+  hubRuntime.execute("resumeRule", ["ai-router"]);
 });
 
-test("overlapping rules and a missing per-subject lane do not cause unintended dispatch", async () => {
-  for (const badRules of [
-    [rule, { ...rule, name: "generic-event", when: { source: "workstation", types: ["*"] } }],
-    [{ ...rule, parallel: undefined }],
+test("bad disk rules stop execution before the event is recorded", async () => {
+  const disk = process.env.AGENT_AUTOLOOP_RULES!;
+  for (const [badRules, message] of [
+    [[], /缺少 ai-router/],
+    [[{ ...rule, when: { ...rule.when, source: "other" } }], /source\.name/],
+    [[{ ...rule, when: { ...rule.when, types: ["router.task.direct"] } }], /router\.task\.plan/],
+    [[{ ...rule, to: "missing" }], /已登记的 Agent/],
+    [[rule, { ...rule, name: "generic-event", when: { source: "workstation", types: ["*"] } }], /其他规则/],
+    [[{ ...rule, parallel: 2 }], /parallel: 1/],
+  ] as const) {
+    await writeFile(disk, JSON.stringify({ ...rules, rules: badRules }));
+    hubRuntime.reloadRules();
+    const events = state().sources.find(({ id }) => id === "workstation")?.events;
+    const response = await post("修改一个错字");
+    assert.ok(response.status >= 400);
+    assert.match((await response.json()).error, message);
+    assert.equal(state().sources.find(({ id }) => id === "workstation")?.events, events);
+  }
+  await writeFile(disk, JSON.stringify(rules));
+  hubRuntime.reloadRules();
+});
+
+test("a missing or differently configured live rule cannot pass disk validation", async () => {
+  const activeFile = process.env.AGENT_AUTOLOOP_RULES!;
+  const alternate = join(home, "console-rules.json");
+  for (const active of [
+    { ...rules, rules: [] },
+    { ...rules, rules: [{ ...rule, parallel: 2 }] },
   ]) {
-    await writeFile(process.env.AGENT_AUTOLOOP_RULES!, JSON.stringify({ ...rules, rules: badRules }));
+    await writeFile(activeFile, JSON.stringify(active));
+    await writeFile(alternate, JSON.stringify(rules));
     hubRuntime.reloadRules();
     const seq = state().seq;
-    assert.equal((await post("修改一个错字")).status, 409);
+    process.env.AGENT_AUTOLOOP_RULES = alternate;
+    try {
+      const response = await post("修改一个错字");
+      assert.equal(response.status, 409);
+      assert.match((await response.json()).error, /中台.*生效/);
+    } finally { process.env.AGENT_AUTOLOOP_RULES = activeFile; }
     assert.equal(state().seq, seq);
+  }
+  await writeFile(activeFile, JSON.stringify(rules));
+  hubRuntime.reloadRules();
+});
+
+test("a Source key assigned to another source cannot create an event", async () => {
+  const config = join(home, "config.json");
+  const other = hubRuntime.addKey("source", "other");
+  await writeFile(config, JSON.stringify({ url: hubUrl, owner, source: { name: "workstation", key: other } }));
+  const seq = state().seq;
+  try {
+    const response = await post("修改一个错字");
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /凭据.*来源/);
+    assert.equal(state().seq, seq);
+  } finally {
+    await writeFile(config, JSON.stringify({ url: hubUrl, owner, source: { name: "workstation", key: source } }));
+  }
+});
+
+test("a guarded event with a stale rule revision is rejected without recording it", async () => {
+  const { rulesRevision } = await hubClient(hubUrl, owner).state();
+  const disk = process.env.AGENT_AUTOLOOP_RULES!;
+  await writeFile(disk, JSON.stringify({ ...rules, rules: [] }));
+  hubRuntime.reloadRules();
+  const seq = state().seq;
+  try {
+    const result = await fetch(hubUrl + "/v1/events", {
+      method: "POST", headers: { authorization: "Bearer " + source, "content-type": "application/json",
+        "x-autoloop-source": "workstation", "x-autoloop-rules-revision": rulesRevision },
+      body: JSON.stringify({ id: randomUUID(), type: "router.task.direct" }),
+    });
+    assert.equal(result.status, 409);
+    assert.equal(state().seq, seq);
+  } finally {
+    await writeFile(disk, JSON.stringify(rules));
+    hubRuntime.reloadRules();
   }
 });
 

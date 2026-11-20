@@ -13,7 +13,7 @@ import { NotFound } from "../kernel/errors.ts";
 import { initialize, rows, statement, type Fact, type Row, type Table } from "../kernel/evolve.ts";
 import * as query from "../kernel/query.ts";
 import { commitLatest, openView } from "../kernel/store.ts";
-import { parseRules as checkRules, RulesError } from "../protocol/rules.ts";
+import { parseRules as checkRules, RulesError, rulesRevision } from "../protocol/rules.ts";
 
 privateDirectory(HOME);
 const masterKeyFile = join(HOME, "master.key");
@@ -82,10 +82,16 @@ export const onChange = (listener: Listener) => {
   return () => listeners.delete(listener);
 };
 
-export function execute(type: string, args: any[], now = Date.now()) {
+export function execute(
+  type: string,
+  args: any[],
+  now = Date.now(),
+  check?: (latest: ReturnType<typeof getView>) => void,
+) {
   let facts: Fact[] = [];
   let value: any;
   current = commitLatest(db, format, (latest) => {
+    check?.(latest);
     ({ facts, value } = decide(latest, { type, args }, now, environment));
     return facts;
   });
@@ -153,7 +159,12 @@ export function stateOf(now = Date.now(), before?: number) {
   db.exec("BEGIN");
   try {
     const latest = getView();
-    return { seq: latest.seq, ...state(now, before, query.configuration(latest), { all, view, unrouted }) };
+    const configuration = query.configuration(latest);
+    return {
+      seq: latest.seq,
+      rulesRevision: rulesRevision(configuration),
+      ...state(now, before, configuration, { all, view, unrouted }),
+    };
   } finally {
     db.exec("COMMIT");
   }

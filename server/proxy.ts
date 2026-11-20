@@ -83,7 +83,7 @@ function route(method: string | undefined, url: URL, req: IncomingMessage): Rout
 }
 
 function stateForBrowser(value: Row) {
-  const { agents, ...rest } = value;
+  const { agents, rulesRevision: _rulesRevision, ...rest } = value;
   return {
     ...rest, agents: Array.isArray(agents) ? (agents as Row[]).map(({ id, name, use, worker, seenAt, online, totals }) =>
       ({ id, name, use, worker, seenAt, online, totals })) : agents,

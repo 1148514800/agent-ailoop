@@ -25,7 +25,7 @@ export async function fixture(home) {
       eventRule("知识库同步", "codex", "docs.changed"),
       eventRule("客户反馈分流", "claude", "feedback.new"),
       eventRule("服务健康检查", "runner", "service.check"),
-      eventRule("ai-router", "router", "router.task.*"),
+      { ...eventRule("ai-router", "router", "router.task.*"), parallel: 1 },
       cronRule("每日运营简报", "claude", "0 9 * * *"),
       cronRule("项目周报", "codex", "0 10 * * 1"),
     ],

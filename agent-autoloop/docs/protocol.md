@@ -124,6 +124,8 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 → 200 { "event": 34, "duplicate": false, "routed": ["处理意见"] }
 ```
 
+依赖特定规则配置的客户端可同时发送 `X-Autoloop-Source` 和 `X-Autoloop-Rules-Revision`。前者是预期来源编号，后者取自本人 `GET /v1/state` 的 `rulesRevision`。中台在写入事件的同一事务内核对密钥归属和生效规则，预期不符返回 409，事件不写入。旧客户端仍可按原格式发送。只有状态响应带有 `rulesRevision` 的中台才支持这项检查。
+
 - `id` 和 `type` 必填。同一来源同一 `id` 只记一次，所以来源尽管重发。
 - `subject` 只能是标识符（字母、数字和 `# . _ : / @ -`），`link` 只能是纯 ASCII 网址，因为它们会进提示词。`summary`、`detail` 不进提示词。
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。

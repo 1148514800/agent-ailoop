@@ -87,14 +87,14 @@ AUTOLOOP_ROUTER_API_KEY=你的服务端密钥
 AUTOLOOP_ROUTER_MODEL=你的模型名称
 ```
 
-2. 合并 [ai-router 规则示例](docs/ai-router.rule.json) 到本机 `rules.json` 的 `rules` 数组。用 `config.json` 的 `source.name` 替换示例的来源，并确认它在 `rules.json` 的 `sources` 中登记。把 `to` 指向现有 Agent，把 `cwd` 改成可信项目目录。保留 `parallel: 1` 让每个请求使用独立事项。其他事件规则应避免用通配符同时匹配这两种 Router 事件。
-3. 执行 `npm run hub -- check` 校验本机规则。首次安装新版时重新构建并启动 Web 控制台。macOS 可关闭由启动器管理的旧实例后双击启动。
+2. 合并 [ai-router 规则示例](docs/ai-router.rule.json) 到本机 `rules.json` 的 `rules` 数组。用 `config.json` 的 `source.name` 替换示例的来源，并确认它在 `rules.json` 的 `sources` 中登记。把 `to` 指向现有 Agent，把 `cwd` 改成现有且已授权的工作目录。保留 `parallel: 1` 让每个请求使用独立事项。其他规则须避开 `router.task.direct` 和 `router.task.plan`。默认配置目录为 `~/.agent-autoloop`，可以用 `AGENT_AUTOLOOP_HOME` 指定目录，用 `AGENT_AUTOLOOP_RULES` 单独指定规则文件。中台和控制台使用同一份规则。
+3. 执行 `npm run hub -- check` 校验本机规则。运行中的中台会自动加载有效的规则修改。Router 派发需要本项目附带的中台版本，首次升级时请在轮次执行完毕后重启中台和控制台。macOS 可关闭旧实例后双击启动。如果旧实例由其他方式启动，先用对应方式退出，再从本项目启动。
 
 ### API 与数据流
 
 - `POST /api/router/message` 接收 `{"requestId":"UUID","message":"你好"}`，需要本机浏览器会话、同源请求和 `X-Console-CSRF`。输入最多 4000 个 Unicode 字符，仍受控制台 JSON 请求体大小限制。
 - Node 用原生 `fetch` 调用模型服务的 `/chat/completions`。模型只收到系统提示词和本次文字。远程服务使用 HTTPS，本机回环地址可用 HTTP。请求超时为 15 秒，使用兼容 `max_tokens` 的模型，输出限制为 480 Token。模型错误或格式不合规时，页面会报错且任务不会提交。
-- 直接回答返回 `{ action: "reply", needs_plan: false, answer }`。执行时，Node 用 `config.json` 的 Source 凭据发 `POST /v1/events`。简单任务使用 `router.task.direct`，复杂任务使用 `router.task.plan`。原文字在事件的 `detail` 中，由 Worker 写入 `context.json`。
+- 直接回答返回 `{ action: "reply", needs_plan: false, answer }`。执行前，控制台校验本机 `ai-router` 规则，并核对中台 `GET /v1/state` 返回的规则版本。提交时，中台核对 Source 密钥及生效规则，冲突时拒绝写入事件。简单任务使用 `router.task.direct`，复杂任务使用 `router.task.plan`。原文字在事件的 `detail` 中，由 Worker 写入 `context.json`。
 - 任务提交结果包含 `eventId`、`status` 和关联的 `run`。状态可能为 `submitted`、`paused` 或 `unmatched`。关联轮次由 `GET /v1/events/:id` 查询；页面沿用现有状态快照和事件流显示排队、执行、结果和任务详情，审批继续走原审批中心。
 - 调用失败重试时使用相同 UUID。控制台短期复用路由结果，中台按来源和事件 ID 持久去重。重启控制台后，同一请求可能再次调用模型。密钥只留在本机服务端，Router 的模型 Key 不进入浏览器构建。
 

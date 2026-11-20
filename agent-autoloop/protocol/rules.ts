@@ -2,7 +2,10 @@
 // rules between them and, only to be shown, the scheduled tasks that run elsewhere. A mistake is caught here with a
 // message saying where: at start it stops the hub, later it leaves the old rules running and the owner is told.
 import { nextRun, parseCron } from "../kernel/cron.ts";
+import { digest } from "../kernel/credentials.ts";
 import { SCHEDULE, type Rule, type Rules } from "../kernel/rules.ts";
+
+export const rulesRevision = (rules: Rules) => digest(JSON.stringify(rules));
 
 export class RulesError extends Error {
   readonly issues: string[];

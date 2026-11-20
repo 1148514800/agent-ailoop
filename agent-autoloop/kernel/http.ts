@@ -5,6 +5,7 @@ import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import { iso, type Row, type View } from "./evolve.ts";
 import { agentsOf, cancels, cardView, configuration, eventOutcome } from "./query.ts";
 import { eventRule, ruleOf } from "./rules.ts";
+import { rulesRevision } from "../protocol/rules.ts";
 import { isAsk } from "../protocol/validate.ts";
 
 export type Services = {
@@ -12,7 +13,7 @@ export type Services = {
   view(): View;
   environment: Environment;
   commit: string;
-  dispatch(type: string, args: any[], now: number): any;
+  dispatch(type: string, args: any[], now: number, check?: (latest: View) => void): any;
   state(now: number, before?: number): unknown;
   /** What a pause has kept from a rule since it began and nothing has made up yet, newest first: how many, and the
    * latest of them, or all of them. */
@@ -298,7 +299,22 @@ async function route(call: Call): Promise<Response> {
   const hook = /^\/v1\/in\/([a-z][a-z0-9-]*)$/.exec(path);
   if (method === "POST" && hook) return webhook(call, hook[1]);
   if (method === "POST" && path === "/v1/events") {
-    return json(act(call, "ingest", requireKey(call, "source"), await readJson(request)));
+    const source = requireKey(call, "source");
+    const expectedSource = request.headers.get("x-autoloop-source");
+    const revision = request.headers.get("x-autoloop-rules-revision");
+    if (expectedSource === null && revision === null) return json(act(call, "ingest", source, await readJson(request)));
+    if (!expectedSource || !revision || !/^[a-f0-9]{64}$/.test(revision)) {
+      throw new InputError("来源和规则版本要一起提供");
+    }
+    const event = await readJson(request);
+    return json(
+      services.dispatch("ingest", [source, event], services.now(), (latest) => {
+        if (source !== expectedSource || whose(latest, "source", token) !== source) {
+          throw new Conflict("来源密钥与预期来源不符");
+        }
+        if (rulesRevision(configuration(latest)) !== revision) throw new Conflict("生效规则已变化，请重新核对");
+      }),
+    );
   }
   const sent = /^\/v1\/events\/([1-9][0-9]*)$/.exec(path);
   if (method === "GET" && sent) {
