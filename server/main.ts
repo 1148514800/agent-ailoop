@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadHub } from "./hub.ts";
 import { createConsole } from "./proxy.ts";
 import { createRouter } from "./router-dispatch.ts";
-import { localRouterConfig } from "./router.ts";
+import { localRouterConfig, localRouterKey } from "./router.ts";
 
 const root = join(import.meta.dirname, "..");
 const dev = process.argv.includes("--dev");
@@ -49,7 +49,7 @@ if (!/^\d+$/.test(portText) || !Number.isInteger(port) || port > 65535) {
   console.error("AUTOLOOP_CONSOLE_PORT 必须在 0 到 65535 之间。");
   process.exit(1);
 }
-const router = createRouter({ config: () => localRouterConfig(root), loadHub });
+const router = createRouter({ config: () => localRouterConfig(root), modelKey: () => localRouterKey(root), loadHub });
 const server = createConsole({ loadHub, router, frontend: serve });
 server.on("error", (error: NodeJS.ErrnoException) => {
   console.error(error.code === "EADDRINUSE" ? "端口已占用，请指定其他 AUTOLOOP_CONSOLE_PORT。" : "无法启动本地控制台。");

@@ -1,28 +1,29 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { eventRule, typeMatches } from "../agent-autoloop/kernel/rules.ts";
 import { parseRules, RulesError, rulesRevision } from "../agent-autoloop/protocol/rules.ts";
 import { ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
-import type { ExecuteDecision, RouterReply, RouterResult } from "../shared/router.ts";
+import type { ExecuteDecision, RouterMode, RouterProject, RouterReply, RouterResult } from "../shared/router.ts";
 import type { RunState } from "../shared/types.ts";
 import type { Hub } from "./hub.ts";
+import { routerRecords } from "./router-records.ts";
 import { classify, RouterError } from "./router.ts";
 import type { routerConfig } from "./router.ts";
 
-const RULE = "ai-router";
-const DIRECT = "router.task.direct";
-const PLAN = "router.task.plan";
-const ROUTER_TYPES = [DIRECT, PLAN];
+const PROJECT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const PROJECT_PREFIX = "ai-project-";
+const validProject = (id: unknown): id is string => typeof id === "string" && id.length <= 42 && PROJECT.test(id);
+const ruleName = (id: string) => id === "default" ? "ai-router" : PROJECT_PREFIX + id;
+const eventPrefix = (id: string) => id === "default" ? "router.task" : "router.project." + id;
+const dataHome = () => process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(), ".agent-autoloop");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const STATES = new Set<RunState>(["queued", "claimed", "unknown", "done", "nothing", "cancelled"]);
 const CACHE_LIMIT = 256;
 type RecordOfRequest = {
   digest: string;
-  decision?: RouterReply | ExecuteDecision;
-  target?: string;
-  eventId?: number;
+  reply?: RouterReply;
   pending?: Promise<RouterResult>;
 };
 type HubSource = Hub & { source: NonNullable<Hub["source"]> };
@@ -34,15 +35,15 @@ type EventOutcome = {
 
 async function loadRules() {
   const file = process.env.AGENT_AUTOLOOP_RULES
-    ?? join(process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(), ".agent-autoloop"), "rules.json");
+    ?? join(dataHome(), "rules.json");
   try {
     return parseRules(await readFile(file, "utf8"), Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new RouterError(503, "本机找不到 rules.json，请先配置 ai-router 规则。任务未提交。");
     }
-    if (error instanceof RulesError && error.issues.some((issue) => issue.startsWith("规则「ai-router」的 to 不是已登记的 Agent"))) {
-      throw new RouterError(409, "ai-router 的 to 必须指向已登记的 Agent。任务未提交。");
+    if (error instanceof RulesError && error.issues.some((issue) => /^规则「ai-(?:router|project-[a-z0-9-]+)」的 to 不是已登记的 Agent/.test(issue))) {
+      throw new RouterError(409, "项目规则的 to 必须指向已登记的 Agent。任务未提交。");
     }
     throw new RouterError(503, "无法读取有效的 rules.json，请运行 npm run hub -- check。任务未提交。");
   }
@@ -60,6 +61,7 @@ async function hubRequest<T>(hub: Hub, path: string, key: string, signal: AbortS
     });
     if (!response.ok) {
       await response.body?.cancel();
+      if (response.status === 404 && path.startsWith("/v1/events?key=")) return undefined as T;
       if (response.status === 401 || response.status === 403) {
         throw new RouterError(502, "中台拒绝了本机配置中的凭据，请检查 config.json。");
       }
@@ -72,33 +74,49 @@ async function hubRequest<T>(hub: Hub, path: string, key: string, signal: AbortS
   } catch (error) {
     if (error instanceof RouterError) throw error;
     if (submission) throw new RouterError(502, "中台未确认事件是否记录。请保留原请求并重试。");
+    if (path.startsWith("/v1/events?key=")) throw new RouterError(502, "暂时无法确认上次提交是否已记录。请保留原请求并重试。");
     if (path.startsWith("/v1/events/")) throw new RouterError(502, "事件已记录，暂时无法读取关联轮次。请保留原请求并重试。");
     throw new RouterError(502, "无法核对中台规则，任务未提交。");
   }
 }
 
-async function guardRoute(hub: HubSource, signal: AbortSignal) {
-  const rules = await loadRules();
-  const name = hub.source.name;
-  const router = rules.rules.find((rule) => rule.name === RULE);
-  if (!router) throw new RouterError(409, "rules.json 缺少 ai-router 规则。任务未提交。");
-  if (!eventRule(router) || router.when.source !== name || !Object.hasOwn(rules.sources, name)) {
-    throw new RouterError(409, "ai-router 的 when.source 必须与 config.json 的 source.name 一致，并在 rules.json 登记。任务未提交。");
+type Rules = Awaited<ReturnType<typeof loadRules>>;
+function projectRule(rules: Rules, id: string) {
+  const name = ruleName(id);
+  const rule = rules.rules.find((entry) => entry.name === name);
+  if (!rule) throw new RouterError(409, "rules.json 缺少 " + name + " 规则。任务未提交。");
+  return rule;
+}
+
+async function validateProject(rules: Rules, id: string, source: string) {
+  const rule = projectRule(rules, id);
+  if (!eventRule(rule) || rule.when.source !== source || !Object.hasOwn(rules.sources, source)) {
+    throw new RouterError(409, "项目规则的 when.source 必须与 config.json 的 source.name 一致，并在 rules.json 登记。任务未提交。");
   }
-  const patterns = router.when.types;
-  if (!ROUTER_TYPES.every((type) => typeMatches(patterns, type))) {
-    throw new RouterError(409, "ai-router 必须同时匹配 router.task.direct 和 router.task.plan。任务未提交。");
+  const types = [eventPrefix(id) + ".direct", eventPrefix(id) + ".plan"];
+  const patterns = rule.when.types;
+  if (!types.every((type) => typeMatches(patterns, type))) {
+    throw new RouterError(409, rule.name + " 必须同时匹配 " + types.join(" 和 ") + "。任务未提交。");
   }
-  if (!Object.hasOwn(rules.agents, router.to)) {
-    throw new RouterError(409, "ai-router 的 to 必须指向已登记的 Agent。任务未提交。");
+  if (!Object.hasOwn(rules.agents, rule.to)) {
+    throw new RouterError(409, "项目规则的 to 必须指向已登记的 Agent。任务未提交。");
   }
-  if (router.parallel !== 1) {
-    throw new RouterError(409, "ai-router 必须设置 parallel: 1，让不同请求各自排队。任务未提交。");
+  if (rule.parallel !== 1) {
+    throw new RouterError(409, rule.name + " 必须设置 parallel: 1，让不同请求各自排队。任务未提交。");
   }
-  if (rules.rules.some((rule) => rule !== router && eventRule(rule) && rule.when.source === name &&
-      ROUTER_TYPES.some((type) => typeMatches(rule.when.types, type)))) {
-    throw new RouterError(409, "Router 事件也会命中其他规则。请缩小其他规则的事件类型范围，任务未提交。");
+  if (rules.rules.some((other) => other !== rule && eventRule(other) && other.when.source === source &&
+      types.some((type) => typeMatches(other.when.types, type)))) {
+    throw new RouterError(409, "项目事件也会命中其他规则。请缩小其他规则的事件类型范围，任务未提交。");
   }
+  const cwd = rule.cwd.replace(/^~(?=[/\\])/, homedir());
+  const resolved = isAbsolute(cwd) ? await realpath(cwd).catch(() => null) : null;
+  if (!resolved || !(await stat(resolved).catch(() => null))?.isDirectory()) {
+    throw new RouterError(409, rule.name + " 的工作目录不存在或无法访问。任务未提交。");
+  }
+  return digest(JSON.stringify([resolved, rule.to, rules.agents[rule.to]]));
+}
+
+async function guardRevision(hub: Hub, rules: Rules, signal: AbortSignal) {
   const active = await hubRequest<{ rulesRevision?: string }>(hub, "/v1/state", hub.owner, signal);
   if (!active?.rulesRevision || !/^[a-f0-9]{64}$/.test(active.rulesRevision)) {
     throw new RouterError(503, "当前中台不支持规则版本校验，请用此项目附带的中台启动。任务未提交。");
@@ -111,21 +129,50 @@ async function guardRoute(hub: HubSource, signal: AbortSignal) {
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 const redactText = (text: string, secrets: string[]) => secrets.reduce((value, key) => value.replaceAll(key, "[已隐藏]"), text);
-export type RouterHandler = (body: Record<string, unknown>, signal: AbortSignal) => Promise<RouterResult>;
-
-export function createRouter(options: { config(): Promise<ReturnType<typeof routerConfig>>; loadHub(): Promise<Hub> }): RouterHandler {
+export function createRouter(options: {
+  config(): Promise<ReturnType<typeof routerConfig>>;
+  loadHub(): Promise<Hub>;
+  modelKey?(): Promise<string | undefined>;
+}) {
   const recent = new Map<string, RecordOfRequest>();
+  async function loadSource(): Promise<HubSource> {
+    const hub = await options.loadHub().catch(() => null);
+    if (!hub?.source) throw new RouterError(503, "执行任务需要在本机 config.json 配置有效的 Source 凭据。任务未提交。");
+    return { ...hub, source: hub.source };
+  }
 
-  return async (body, signal) => {
-    const { requestId, message } = body;
-    if (Object.keys(body).length !== 2 || typeof requestId !== "string" || !UUID.test(requestId) ||
+  async function projects(signal: AbortSignal) {
+    const [rules, hub] = await Promise.all([loadRules(), loadSource()]);
+    const revisionError = await guardRevision(hub, rules, signal).then(() => undefined, (error: RouterError) => error.message);
+    const secrets = [hub.owner, hub.source.key, ...hub.secrets, await options.modelKey?.()]
+      .filter((key): key is string => !!key).sort((a, b) => b.length - a.length);
+    const entries = rules.rules.flatMap((rule): RouterProject[] => {
+      const id = rule.name === "ai-router" ? "default" : rule.name.startsWith(PROJECT_PREFIX) ? rule.name.slice(PROJECT_PREFIX.length) : "";
+      if (!validProject(id) || rule.name !== ruleName(id)) return [];
+      return [{ id, name: redactText(basename(rule.cwd) || rule.name, secrets), rule: rule.name }];
+    });
+    entries.sort((a, b) => a.id === "default" ? -1 : b.id === "default" ? 1 : a.id.localeCompare(b.id));
+    return { projects: await Promise.all(entries.map(async (entry) => {
+      const error = await validateProject(rules, entry.id, hub.source.name).then(() => revisionError, (error: RouterError) => error.message);
+      return error ? { ...entry, error } : entry;
+    })) };
+  }
+
+  async function submit(body: Record<string, unknown>, signal: AbortSignal, mode: RouterMode = "auto") {
+    const { requestId, message, needsPlan } = body;
+    const projectId = body.projectId === undefined && mode === "auto" ? "default" : body.projectId;
+    const allowed = mode === "direct" ? ["requestId", "message", "projectId", "needsPlan"] : ["requestId", "message", "projectId"];
+    if (Object.keys(body).some((field) => !allowed.includes(field)) || typeof requestId !== "string" || !UUID.test(requestId) ||
         typeof message !== "string" || !message.trim() || !message.isWellFormed() || [...message].length > ROUTER_MESSAGE_LIMIT) {
       throw new RouterError(400, "请输入有效的 UUID 与 1 到 4000 字的消息。");
     }
+    if (!validProject(projectId)) throw new RouterError(400, "项目编号格式不正确。");
+    if (mode === "direct" && typeof needsPlan !== "boolean") throw new RouterError(400, "先规划再执行必须是布尔值。");
     const id = requestId.toLowerCase();
-    const messageHash = digest(message);
+    const fingerprint = digest(JSON.stringify([message, projectId, mode, needsPlan ?? null]));
+    const changed = () => new RouterError(409, "该请求编号已用于另一条消息、项目或执行策略。");
     let entry = recent.get(id);
-    if (entry && entry.digest !== messageHash) throw new RouterError(409, "该请求编号已用于另一条消息。");
+    if (entry && entry.digest !== fingerprint) throw changed();
     if (entry?.pending) return entry.pending;
     if (!entry) {
       if (recent.size >= CACHE_LIMIT) {
@@ -133,33 +180,72 @@ export function createRouter(options: { config(): Promise<ReturnType<typeof rout
         if (!settled) throw new RouterError(429, "Router 请求过多，请稍后重试。");
         recent.delete(settled[0]);
       }
-      entry = { digest: messageHash };
+      entry = { digest: fingerprint };
       recent.set(id, entry);
     }
     const record = entry;
     record.pending = (async (): Promise<RouterResult> => {
-      const config = await options.config();
+      const store = routerRecords(join(dataHome(), "router-requests"), id);
+      let saved = await store.request();
+      if (saved && saved.digest !== fingerprint) throw changed();
       const hub = await options.loadHub().catch(() => null);
-      const secrets = [...new Set([config.key, hub?.owner, hub?.source?.key, ...(hub?.secrets ?? [])]
+      const modelKey = await options.modelKey?.();
+      const secrets = [...new Set([modelKey, hub?.owner, hub?.source?.key, ...(hub?.secrets ?? [])]
         .filter((key): key is string => !!key))].sort((a, b) => b.length - a.length);
-      if (secrets.some((key) => message.includes(key))) {
-        throw new RouterError(400, "消息包含本机凭据，请移除后重试。");
-      }
-      if (!record.decision) {
+      if (secrets.some((key) => message.includes(key))) throw new RouterError(400, "消息包含本机凭据，请移除后重试。");
+
+      if (!saved && mode === "auto" && body.projectId !== undefined) projectRule(await loadRules(), projectId);
+      let planning = saved?.needsPlan;
+      if (mode === "direct") planning = needsPlan as boolean;
+      else if (typeof planning !== "boolean") {
+        if (record.reply) return { ...record.reply, answer: redactText(record.reply.answer, secrets) };
+        const config = await options.config();
+        if (message.includes(config.key)) throw new RouterError(400, "消息包含本机凭据，请移除后重试。");
+        if (!secrets.includes(config.key)) secrets.push(config.key);
         const decision = await classify(config, message, signal);
-        record.decision = decision.action === "reply" ? { ...decision, answer: redactText(decision.answer, secrets) } : decision;
+        if (decision.action === "reply") {
+          saved ??= await store.bind({ digest: fingerprint, needsPlan: null, target: null });
+          if (saved.digest !== fingerprint) throw changed();
+          if (saved.needsPlan === null) {
+            record.reply = { ...decision, answer: redactText(decision.answer, secrets) };
+            return record.reply;
+          }
+          planning = saved.needsPlan;
+        } else {
+          if (saved?.needsPlan === null) throw new RouterError(409, "该请求已得到直接回答，无法重新派发。");
+          planning = decision.needs_plan;
+        }
       }
-      const decision = record.decision;
-      if (decision.action === "reply") return { ...decision, answer: redactText(decision.answer, secrets) };
       if (signal.aborted) throw new RouterError(408, "Router 请求已取消，未继续派发。");
       if (!hub?.source) throw new RouterError(503, "执行任务需要在本机 config.json 配置有效的 Source 凭据。任务未提交。");
-      const selected = { ...hub, source: hub.source };
       const target = hub.url + "/" + hub.source.name;
-      if (record.target && record.target !== target) throw new RouterError(409, "该请求的中台地址或来源已改变，请在原中台核对事件。");
-      const type = decision.needs_plan ? PLAN : DIRECT;
-      if (!record.eventId) {
-        const revision = await guardRoute(selected, signal);
-        record.target = target;
+      if (saved && saved.target !== target) throw new RouterError(409, "该请求的中台地址或来源已改变，请在原中台核对事件。");
+
+      const rule = ruleName(projectId);
+      let eventId = saved ? await store.receipt() : undefined;
+      if (saved && eventId === undefined) {
+        const existing = await hubRequest<{ event: number; source: string } | undefined>(
+          hub, "/v1/events?key=router-" + id, hub.source.key, signal,
+        );
+        if (existing) {
+          if (existing.source !== hub.source.name || !Number.isSafeInteger(existing.event) || existing.event < 1) {
+            throw new RouterError(409, "中台返回的事件来源或编号与本机请求不符。");
+          }
+          eventId = await store.confirm(existing.event);
+        }
+      }
+      if (eventId === undefined) {
+        const rules = await loadRules();
+        const route = await validateProject(rules, projectId, hub.source.name);
+        const revision = await guardRevision(hub, rules, signal);
+        saved ??= await store.bind({ digest: fingerprint, needsPlan: planning, target, route });
+        if (saved.digest !== fingerprint) throw changed();
+        if (saved.target !== target || saved.route !== route || saved.needsPlan === null) {
+          throw new RouterError(409, "该请求绑定的项目、Agent 或中台配置已变更，请核对原任务。");
+        }
+        planning = saved.needsPlan;
+        const type = eventPrefix(projectId) + (planning ? ".plan" : ".direct");
+        // If a response was lost, the hub checks this same source and external ID before inserting anything.
         const accepted = await hubRequest<{ event: number }>(hub, "/v1/events", hub.source.key, signal, {
           source: hub.source.name, revision,
           body: { id: "router-" + id, type, subject: "task-" + id, summary: "AI Router 提交的任务", detail: message },
@@ -167,23 +253,27 @@ export function createRouter(options: { config(): Promise<ReturnType<typeof rout
         if (!Number.isSafeInteger(accepted?.event) || accepted.event < 1) {
           throw new RouterError(502, "中台未返回有效事件编号。请保留原请求并重试。");
         }
-        record.eventId = accepted.event;
+        eventId = await store.confirm(accepted.event);
       }
 
-      const result = await hubRequest<EventOutcome>(hub, "/v1/events/" + record.eventId, hub.source.key, signal);
-      if (result?.event !== record.eventId || !Array.isArray(result.runs) ||
+      const result = await hubRequest<EventOutcome>(hub, "/v1/events/" + eventId, hub.source.key, signal);
+      if (result?.event !== eventId || !Array.isArray(result.runs) ||
           !Array.isArray(result.paused) || !Array.isArray(result.routed)) {
         throw new RouterError(502, "无法确认已记录事件的关联轮次，请保留原请求并重试。");
       }
-      const found = result.runs.find((run) => run.rule === RULE);
+      const found = result.runs.find((run) => run.rule === rule);
+      if (!found && [...result.routed, ...result.paused].some((name) => name !== rule)) {
+        throw new RouterError(409, "该请求编号已有其他规则的事件。请核对原任务。");
+      }
       if (found && (!Number.isSafeInteger(found.run) || found.run < 1 || !STATES.has(found.state))) {
         throw new RouterError(502, "中台返回的关联轮次无效，请保留原请求并重试。");
       }
-      if (!found && result.routed.includes(RULE)) {
+      if (!found && result.routed.includes(rule)) {
         throw new RouterError(502, "中台已记录规则命中，但尚未取得关联轮次，请保留原请求并重试。");
       }
+      const decision: ExecuteDecision = { action: "execute", needs_plan: planning, answer: "" };
       return { ...decision, eventId: result.event,
-        status: found ? "submitted" : result.paused.includes(RULE) ? "paused" : "unmatched",
+        status: found ? "submitted" : result.paused.includes(rule) ? "paused" : "unmatched",
         run: found ? {
           id: found.run, state: found.state, attempts: found.attempts,
           summary: typeof found.summary === "string" ? redactText(found.summary, secrets) : null,
@@ -193,5 +283,8 @@ export function createRouter(options: { config(): Promise<ReturnType<typeof rout
     })();
     try { return await record.pending; }
     finally { record.pending = undefined; }
-  };
+  }
+  return Object.assign(submit, { projects });
 }
+
+export type RouterHandler = ReturnType<typeof createRouter>;

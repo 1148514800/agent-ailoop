@@ -2,7 +2,7 @@
 import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
-import { iso, type Row, type View } from "./evolve.ts";
+import { iso, rows, type Row, type View } from "./evolve.ts";
 import { agentsOf, cancels, cardView, configuration, eventOutcome } from "./query.ts";
 import { eventRule, ruleOf } from "./rules.ts";
 import { rulesRevision } from "../protocol/rules.ts";
@@ -315,6 +315,14 @@ async function route(call: Call): Promise<Response> {
         if (rulesRevision(configuration(latest)) !== revision) throw new Conflict("生效规则已变化，请重新核对");
       }),
     );
+  }
+  if (method === "GET" && path === "/v1/events") {
+    const source = requireKey(call, "source");
+    const key = call.url.searchParams.get("key");
+    if (!key || [...key].length > 200) throw new InputError("事件编号不正确");
+    const [found] = rows(call.view, "events", { source, key }, 1);
+    if (!found?.sent) throw new NotFound("没有这条事件");
+    return json({ event: found.id, source });
   }
   const sent = /^\/v1\/events\/([1-9][0-9]*)$/.exec(path);
   if (method === "GET" && sent) {

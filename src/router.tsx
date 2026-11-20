@@ -1,34 +1,60 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Send, Sparkles } from "lucide-react";
 import { ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
-import type { RouterResult } from "../shared/router.ts";
+import type { RouterMode, RouterProject, RouterResult } from "../shared/router.ts";
 import type { State } from "../shared/types.ts";
-import { messageOf, runLabels, runStatus } from "./data.ts";
+import { api, messageOf, runLabels, runStatus } from "./data.ts";
 import { Badge, Button, ErrorLine, Panel, TextLink } from "./ui.tsx";
 
-export type SendRouterMessage = (body: { requestId: string; message: string }) => Promise<RouterResult>;
+type RouterSubmission = { requestId: string; message: string; projectId: string; needsPlan?: boolean };
+export type SendRouterMessage = (body: RouterSubmission, mode: RouterMode) => Promise<RouterResult>;
+type Draft = { body: RouterSubmission; mode: RouterMode; projectName: string };
+const modeLabel = { auto: "AI 自动判断", direct: "直接创建任务" };
 
 export function RouterPanel({ state, send }: { state: State | null; send: SendRouterMessage }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<RouterResult | null>(null);
   const [error, setError] = useState("");
-  const request = useRef<{ requestId: string; message: string } | null>(null);
+  const request = useRef<Draft | null>(null);
+  const [projects, setProjects] = useState<RouterProject[]>([]);
+  const [projectId, setProjectId] = useState("");
+  const [mode, setMode] = useState<RouterMode>("auto");
+  const [needsPlan, setNeedsPlan] = useState(false);
+  const [projectError, setProjectError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [reload, setReload] = useState(0);
+  const [sent, setSent] = useState<Draft | null>(null);
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setProjectError("");
+    void api<{ projects: RouterProject[] }>("/router/projects").then(({ projects }) => {
+      if (!current) return;
+      setProjects(projects);
+      setProjectId((id) => projects.some((item) => item.id === id) ? id : projects.find((item) => item.id === "default")?.id ?? projects[0]?.id ?? "");
+    }).catch((error) => {
+      if (current) setProjectError(messageOf(error));
+    }).finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [reload]);
+  const project = projects.find((item) => item.id === projectId);
   const count = [...text].length;
-  const canSend = !!text.trim() && count <= ROUTER_MESSAGE_LIMIT;
+  const canSend = !!project && !project.error && !projectError && !loading && !!text.trim() && count <= ROUTER_MESSAGE_LIMIT;
   const activeRun = result?.action === "execute" ? result.run : null;
   const current = activeRun && state?.runs.find((run) => run.id === activeRun.id);
   const run = current || activeRun;
   const status = run && (current ? runStatus(current) : run.state === "queued" && run.attempts > 0 ? "retry" : run.state);
   const [statusText, tone] = status ? runLabels[status] ?? ["状态未知", "neutral"] : ["", "neutral"];
 
-  async function submit(body: NonNullable<typeof request.current>) {
+  async function submit(draft: Draft) {
     if (busy) return;
     setBusy(true);
     setResult(null);
     setError("");
     try {
-      const received = await send(body);
+      const received = await send(draft.body, draft.mode);
+      setSent(draft);
       setResult(received);
       setText("");
       if (received.action === "reply" || received.run) request.current = null;
@@ -39,33 +65,59 @@ export function RouterPanel({ state, send }: { state: State | null; send: SendRo
   return <Panel title="AI Router" icon={Sparkles} className="router-panel">
     <form className="router-form" onSubmit={(event) => {
       event.preventDefault();
-      if (!canSend || busy) return;
-      const pending = request.current?.message === text ? request.current : { requestId: crypto.randomUUID(), message: text };
+      if (!canSend || busy || !project) return;
+      const plan = mode === "direct" ? needsPlan : undefined;
+      const previous = request.current;
+      const pending = previous?.body.message === text && previous.body.projectId === projectId &&
+        previous.mode === mode && previous.body.needsPlan === plan ? previous : {
+          mode, projectName: project.name, body: { requestId: crypto.randomUUID(), message: text, projectId, needsPlan: plan },
+        };
       request.current = pending;
       void submit(pending);
     }}>
+      <div className="router-controls">
+        <label className="field">目标项目
+          <select value={projectId} disabled={busy || loading || !projects.length} onChange={(event) => setProjectId(event.target.value)}>
+            {!projects.length && <option value="">{loading ? "正在加载项目…" : "没有可选项目"}</option>}
+            {projects.map((item) => <option key={item.id} value={item.id}>
+              {item.name} · {item.id}{item.error ? "（不可用）" : ""}
+            </option>)}
+          </select>
+        </label>
+        <fieldset className="router-modes" disabled={busy}>
+          <legend>执行模式</legend>
+          <label><input type="radio" name="router-mode" checked={mode === "auto"} onChange={() => setMode("auto")} />AI 自动判断</label>
+          <label><input type="radio" name="router-mode" checked={mode === "direct"} onChange={() => setMode("direct")} />直接创建任务</label>
+          {mode === "direct" && <label><input type="checkbox" checked={needsPlan} onChange={(event) => setNeedsPlan(event.target.checked)} />先规划再执行</label>}
+        </fieldset>
+      </div>
+      {(projectError || project?.error || (!loading && !projects.length)) && <div className="router-actions">
+        <ErrorLine>{projectError || project?.error || "请在中台 rules.json 注册目标项目。"}</ErrorLine>
+        <Button type="button" disabled={busy || loading} onClick={() => setReload((value) => value + 1)}>重新加载项目</Button>
+      </div>}
       <label className="field">消息
         <textarea value={text} onChange={(event) => setText(event.target.value)} disabled={busy}
           placeholder="例如，解释一个概念，或帮我修改 README 中的错别字" />
       </label>
       <div className="router-actions">
-        <span className="muted">消息会发送到配置的模型。<span className={count > ROUTER_MESSAGE_LIMIT ? "router-limit" : ""}> {count}/{ROUTER_MESSAGE_LIMIT}</span></span>
-        <Button type="submit" icon={Send} variant="primary" busy={busy} disabled={!canSend}>{busy ? "处理中…" : "发送"}</Button>
+        <span className="muted">{mode === "auto" ? "消息会发送到配置的模型。" : "任务将交给所选项目执行。"}<span className={count > ROUTER_MESSAGE_LIMIT ? "router-limit" : ""}> {count}/{ROUTER_MESSAGE_LIMIT}</span></span>
+        <Button type="submit" icon={Send} variant="primary" busy={busy} disabled={!canSend}>{busy ? "处理中…" : mode === "direct" ? "创建任务" : "发送"}</Button>
       </div>
       {error && <ErrorLine>{error}</ErrorLine>}
     </form>
     {result && <div className="router-result" aria-live="polite">
+      {sent && <div className="muted">{sent.projectName} · {modeLabel[sent.mode]}</div>}
       {result.action === "reply" ? <>
         <Badge tone="blue">直接回答</Badge><p className="body-copy">{result.answer}</p>
       </> : <>
         <div className="router-result-head">
-          <Badge tone="violet">{result.needs_plan ? "建议先规划" : "直接执行"}</Badge>
+          <Badge tone="violet">{result.needs_plan ? sent?.mode === "direct" ? "先规划再执行" : "建议先规划" : "直接执行"}</Badge>
           {run && <Badge tone={tone} dot>{statusText}</Badge>}
           <span className="muted">事件 #{result.eventId}</span>
           {run && <TextLink to={"#runs/" + run.id}>查看第 {run.id} 轮</TextLink>}
         </div>
         {result.status === "paused" && <p className="muted">规则已暂停，事件已记录，等待补跑。</p>}
-        {result.status === "unmatched" && <p className="muted">事件已记录，未匹配 ai-router 规则。</p>}
+        {result.status === "unmatched" && <p className="muted">事件已记录，未匹配所选项目的规则。</p>}
         {run?.summary && <p className="body-copy">{run.summary}</p>}
         {run?.error && <ErrorLine>{run.error}</ErrorLine>}
         {!run && request.current && <Button disabled={!!text} onClick={() => { if (request.current) void submit(request.current); }}>刷新路由结果</Button>}

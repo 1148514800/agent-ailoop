@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export async function fixture(home) {
   const original = resolve(process.env.AUTOLOOP_SOURCE ?? join(import.meta.dirname, "../agent-autoloop"));
   const rulesFile = join(home, "rules.json");
+  const secondProject = join(home, "game-box");
+  await mkdir(secondProject);
   process.env.AGENT_AUTOLOOP_HOME = home;
   process.env.AGENT_AUTOLOOP_RULES = rulesFile;
   const eventRule = (name, to, type) => ({ name, to, when: { source: "local", types: [type] }, cwd: home, prompt: "浏览器验收占位。", parallel: 5 });
@@ -26,6 +28,7 @@ export async function fixture(home) {
       eventRule("客户反馈分流", "claude", "feedback.new"),
       eventRule("服务健康检查", "runner", "service.check"),
       { ...eventRule("ai-router", "router", "router.task.*"), parallel: 1 },
+      { ...eventRule("ai-project-game-box", "router", "router.project.game-box.*"), cwd: secondProject, parallel: 1 },
       cronRule("每日运营简报", "claude", "0 9 * * *"),
       cronRule("项目周报", "codex", "0 10 * * 1"),
     ],

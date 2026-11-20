@@ -80,9 +80,9 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
       await live.refresh();
     }
   };
-  const sendRouter: SendRouterMessage = async (body) => {
+  const sendRouter: SendRouterMessage = async (body, mode) => {
     try {
-      const result = await api<RouterResult>("/router/message", { body, csrf });
+      const result = await api<RouterResult>(mode === "direct" ? "/router/task" : "/router/message", { body, csrf });
       if (result.action === "execute") void live.refresh();
       return result;
     } catch (error) {

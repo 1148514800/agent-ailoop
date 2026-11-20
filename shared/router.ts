@@ -1,6 +1,8 @@
 import type { RunState } from "./types.ts";
 
 export const ROUTER_MESSAGE_LIMIT = 4000;
+export type RouterProject = { id: string; name: string; rule: string; error?: string };
+export type RouterMode = "auto" | "direct";
 
 export type RouterReply = { action: "reply"; needs_plan: false; answer: string };
 export type ExecuteDecision = { action: "execute"; needs_plan: boolean; answer: "" };

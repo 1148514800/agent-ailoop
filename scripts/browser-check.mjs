@@ -195,6 +195,10 @@ try {
     await routerPanel.getByLabel("消息").fill(message);
     await routerPanel.getByRole("button", { name: "发送", exact: true }).click();
   };
+  const project = routerPanel.getByLabel("目标项目");
+  await project.getByRole("option", { name: /game-box/ }).waitFor({ state: "attached" });
+  assert.equal(await project.inputValue(), "default");
+  assert.ok(await routerPanel.getByRole("radio", { name: "AI 自动判断" }).isChecked());
   const originalRuns = (await hub.state()).runs.filter((run) => run.rule === "ai-router").length;
   await sendRouter("你好");
   await routerPanel.getByText("你好，有什么可以帮你？", { exact: true }).waitFor();
@@ -216,6 +220,30 @@ try {
   await routerPanel.getByText("建议先规划", { exact: true }).waitFor();
   const plan = (await hub.claimRouter()).job;
   assert.equal(plan.context.events[0].type, "router.task.plan");
+  await hub.finish(plan, { outcome: "done", summary: "规划验证完成。" });
+  await project.selectOption("game-box");
+  await routerPanel.getByRole("radio", { name: "直接创建任务" }).check();
+  await routerPanel.getByRole("checkbox", { name: "先规划再执行" }).check();
+  const taskInput = routerPanel.getByLabel("消息");
+  const taskButton = routerPanel.getByRole("button", { name: "创建任务", exact: true });
+  await taskInput.fill("校验第二个项目的任务");
+  const taskRequest = (request) => request.url().endsWith("/api/router/task");
+  await page.route("**/api/router/task", (route) => route.abort("failed"), { times: 1 });
+  const firstAttempt = page.waitForRequest(taskRequest);
+  await taskButton.click();
+  const original = (await firstAttempt).postDataJSON();
+  await taskButton.waitFor();
+  assert.equal(await taskInput.inputValue(), original.message);
+  const retry = page.waitForRequest(taskRequest);
+  await taskButton.click();
+  assert.deepEqual((await retry).postDataJSON(), original);
+  await routerPanel.getByText("game-box · 直接创建任务", { exact: true }).waitFor();
+  const direct = (await hub.claimRouter()).job;
+  assert.equal(direct.rule.name, "ai-project-game-box");
+  assert.equal(direct.context.events[0].type, "router.project.game-box.plan");
+  assert.equal(direct.rule.cwd, join(home, "game-box"));
+  await hub.finish(direct, { outcome: "done", summary: "第二个项目执行完成。" });
+  await routerPanel.getByText("第二个项目执行完成。", { exact: true }).waitFor();
 
   await navigate("Agent");
   await page.getByRole("heading", { name: "已配置 Agent" }).waitFor();
@@ -238,5 +266,5 @@ try {
   await restored;
   await page.getByRole("heading", { name: "运行设置" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("通过。临时真实中台 + Chromium 验证了直接访问与自动恢复会话、审批选项 0 和自定义回复、通知结案、历史游标、三项筛选、真实时间线、停止确认、暂停/恢复/补跑/手动触发、SSE 断线恢复、中台离线、深浅主题、手机审批和 AI Router 三条路径。");
+  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、AI 自动判断、多项目选择，以及直接创建任务和断线重试。");
 } finally { await dispose(); }

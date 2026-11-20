@@ -39,13 +39,21 @@ export function routerConfig(env: NodeJS.ProcessEnv): Config {
   }
 }
 
-export async function localRouterConfig(root: string, overrides = process.env) {
+async function localRouterEnv(root: string, overrides = process.env) {
   let env: NodeJS.ProcessEnv = {};
   try { env = parseEnv(await readFile(join(root, ".env.local"), "utf8")); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new RouterError(503, "无法读取 Router 的 .env.local 配置。");
   }
-  return routerConfig({ ...env, ...overrides });
+  return { ...env, ...overrides };
+}
+
+export async function localRouterConfig(root: string, overrides = process.env) {
+  return routerConfig(await localRouterEnv(root, overrides));
+}
+
+export async function localRouterKey(root: string) {
+  return (await localRouterEnv(root).catch(() => process.env)).AUTOLOOP_ROUTER_API_KEY?.trim();
 }
 
 function decisionOf(content: string): Decision {

@@ -72,7 +72,7 @@ $env:AUTOLOOP_CONSOLE_PORT = "4180"
 npm start
 ```
 
-## AI Router v0.1
+## AI Router v0.2
 
 在「运行总览」输入消息。无需工具的问题由 Router 直接回答。需要读取项目、改代码或运行测试时，Router 把任务交给中台。复杂任务会标记为「建议先规划」，规划和执行都由配置的 Agent 完成。
 
@@ -90,15 +90,40 @@ AUTOLOOP_ROUTER_MODEL=你的模型名称
 2. 合并 [ai-router 规则示例](docs/ai-router.rule.json) 到本机 `rules.json` 的 `rules` 数组。用 `config.json` 的 `source.name` 替换示例的来源，并确认它在 `rules.json` 的 `sources` 中登记。把 `to` 指向现有 Agent，把 `cwd` 改成现有且已授权的工作目录。保留 `parallel: 1` 让每个请求使用独立事项。其他规则须避开 `router.task.direct` 和 `router.task.plan`。默认配置目录为 `~/.agent-autoloop`，可以用 `AGENT_AUTOLOOP_HOME` 指定目录，用 `AGENT_AUTOLOOP_RULES` 单独指定规则文件。中台和控制台使用同一份规则。
 3. 执行 `npm run hub -- check` 校验本机规则。运行中的中台会自动加载有效的规则修改。Router 派发需要本项目附带的中台版本，首次升级时请在轮次执行完毕后重启中台和控制台。macOS 可关闭旧实例后双击启动。如果旧实例由其他方式启动，先用对应方式退出，再从本项目启动。
 
+### 注册第二个项目
+
+保留现有 `ai-router` 作为默认项目。在同一个 `rules.json` 的 `rules` 数组中添加下面的规则。将 `source` 和 `to` 换为本机已登记的来源和 Agent，`cwd` 填写实际工作目录。项目 ID 使用 1 到 42 个小写字母、数字或分隔用的连字符。`default` 留给 `ai-router`。
+
+```json
+{
+  "name": "ai-project-game-box",
+  "when": {
+    "source": "local",
+    "types": ["router.project.game-box.direct", "router.project.game-box.plan"]
+  },
+  "to": "codex",
+  "cwd": "/你的实际项目路径/game-box",
+  "parallel": 1,
+  "resume": false,
+  "prompt": "读取本轮 context.json 的 events，将 detail 作为用户任务。direct 类型直接执行并验证，plan 类型先检查工程并制定计划，再执行与验证。遵循本规则的目录、权限和审批机制。"
+}
+```
+
+运行 `npm run hub -- check`，等待中台加载规则后刷新「运行总览」。项目名称取自目录名，任何同来源规则都不能重复匹配该项目的两类事件。若要更换默认项目，等原轮次结束后，修改 `ai-router` 的 `cwd`、Agent 和项目提示词，保留规则名及 `router.task.direct`、`router.task.plan` 的匹配。项目目录须能从控制台所在机器访问，接单机器也须能使用规则配置的同一个路径。
+
+### 使用与验证
+
+在「运行总览 → AI Router」选择目标项目。默认「AI 自动判断」由模型决定直接回答或派发，并判断执行前是否要规划。「直接创建任务」直接提交文字，可勾选「先规划再执行」，无需启用 Router 模型或填写模型密钥。
+
+验收时可在两个独立测试目录注册规则，分别提交创建不同测试文件的任务。点击提交结果的轮次链接，核对关联规则和事件类型。完成后分别检查各目录中的文件。
+
 ### API 与数据流
 
-- `POST /api/router/message` 接收 `{"requestId":"UUID","message":"你好"}`，需要本机浏览器会话、同源请求和 `X-Console-CSRF`。输入最多 4000 个 Unicode 字符，仍受控制台 JSON 请求体大小限制。
-- Node 用原生 `fetch` 调用模型服务的 `/chat/completions`。模型只收到系统提示词和本次文字。远程服务使用 HTTPS，本机回环地址可用 HTTP。请求超时为 15 秒，使用兼容 `max_tokens` 的模型，输出限制为 480 Token。模型错误或格式不合规时，页面会报错且任务不会提交。
-- 直接回答返回 `{ action: "reply", needs_plan: false, answer }`。执行前，控制台校验本机 `ai-router` 规则，并核对中台 `GET /v1/state` 返回的规则版本。提交时，中台核对 Source 密钥及生效规则，冲突时拒绝写入事件。简单任务使用 `router.task.direct`，复杂任务使用 `router.task.plan`。原文字在事件的 `detail` 中，由 Worker 写入 `context.json`。
-- 任务提交结果包含 `eventId`、`status` 和关联的 `run`。状态可能为 `submitted`、`paused` 或 `unmatched`。关联轮次由 `GET /v1/events/:id` 查询；页面沿用现有状态快照和事件流显示排队、执行、结果和任务详情，审批继续走原审批中心。
-- 调用失败重试时使用相同 UUID。控制台短期复用路由结果，中台按来源和事件 ID 持久去重。重启控制台后，同一请求可能再次调用模型。密钥只留在本机服务端，Router 的模型 Key 不进入浏览器构建。
-
-本机可依次输入「你好」「帮我修改 README 中的一个错别字」「帮我重构调度模块并完成相关测试」。后两项会在规则配置的项目内创建真实任务。在试验目录验收时，使用独立中台配置、可信 Agent 与试验规则。
+- `GET /api/router/projects` 返回项目 ID、目录名和规则名。规则或目录不可用时显示错误。
+- `POST /api/router/message` 接收 `requestId`、`message` 和可选的 `projectId`。省略项目时使用 `default`。模型仅接收系统提示词和消息，直接回答不会创建事件。
+- `POST /api/router/task` 接收 `requestId`、`projectId`、`message` 和布尔值 `needsPlan`。两个提交接口均需要本机浏览器会话、同源请求和 `X-Console-CSRF`，消息最多 4000 个 Unicode 字符。
+- 服务端把项目 ID 映射到可信规则，核对磁盘和生效规则版本后提交事件。中台匹配规则、创建轮次，Worker 从规则取 Agent 和 `cwd`。两种模式共用事件和轮次查询逻辑。任务响应包含 `eventId`、`status` 和关联的 `run`。
+- 重试使用同一个 UUID、项目、模式和消息。本机中台数据目录下的 `router-requests/` 保存请求摘要、执行决策和事件编号，供控制台重启后恢复。记录不保存原文、模型回复或密钥，也不会自动清理。已知事件编号时直接读取，提交回执丢失时先按外部事件 ID 查询。旧版中台无法按外部 ID 查询时，使用同一事件 ID 走中台去重。
 
 ## 数据与操作
 

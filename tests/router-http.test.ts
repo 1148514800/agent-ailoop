@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -239,4 +239,91 @@ test("credentials cannot enter model inputs or leak through returned answers and
   const error = await post("你好");
   assert.equal(error.status, 503);
   assert.match(await error.text(), /AUTOLOOP_ROUTER_API_KEY/);
+});
+
+test("project discovery, dispatch and restart recovery preserve project and planning isolation", async () => {
+  const added = { ...rule, name: "ai-project-game-box", cwd: join(home, "game-box"), when: {
+    source: "workstation", types: ["router.project.game-box.direct", "router.project.game-box.plan"],
+  }};
+  await mkdir(added.cwd);
+  const file = process.env.AGENT_AUTOLOOP_RULES!;
+  const save = async (configured: typeof rules) => {
+    await writeFile(file, JSON.stringify(configured));
+    assert.deepEqual(hubRuntime.reloadRules(), {});
+  };
+  await save({ ...rules, rules: [rule, added] });
+  const headers = { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf };
+  const projects = () => fetch(base + "/api/router/projects", { headers }).then(r => r.json());
+  const submit = (body: object, path = "task", requestHeaders = headers) => fetch(base + "/api/router/" + path, {
+    method: "POST", headers: requestHeaders, body: JSON.stringify(body),
+  });
+  assert.equal((await fetch(base + "/api/router/projects")).status, 401);
+  assert.deepEqual((await projects()).projects.map((project: { id: string; error?: string }) => [project.id, project.error]), [
+    ["default", undefined], ["game-box", undefined],
+  ]);
+
+  const direct = { requestId: randomUUID(), projectId: "default", message: "检查默认项目", needsPlan: false };
+  const plan = { requestId: randomUUID(), projectId: "game-box", message: "检查另一个项目", needsPlan: true };
+  const before = modelCalls;
+  assert.equal((await submit(plan, "task", { ...headers, "x-console-csrf": "" })).status, 403);
+  const a = await (await submit(direct)).json();
+  const b = await (await submit(plan)).json();
+  assert.equal(a.status, "submitted", JSON.stringify(a));
+  assert.equal(b.status, "submitted", JSON.stringify(b));
+  assert.equal(a.run.state, "queued");
+  assert.equal(b.run.state, "queued");
+  assert.equal(modelCalls, before);
+  assert.notEqual(a.run.id, b.run.id);
+  assert.equal(key, "");
+
+  const restarted = createRouter(options);
+  const signal = new AbortController().signal;
+  await rm(join(home, "router-requests", plan.requestId + ".event.json"));
+  process.env.AGENT_AUTOLOOP_RULES = join(home, "unavailable.json");
+  try { assert.deepEqual(await restarted(plan, signal, "direct"), b); }
+  finally { process.env.AGENT_AUTOLOOP_RULES = file; }
+  await assert.rejects(restarted({ ...plan, projectId: "default" }, signal, "direct"), { status: 409 });
+  await assert.rejects(restarted({ ...plan, needsPlan: false }, signal, "direct"), { status: 409 });
+  await assert.rejects(restarted({ requestId: plan.requestId, projectId: plan.projectId, message: plan.message }, signal), { status: 409 });
+
+  key = modelKey;
+  try {
+    const eventCount = state().sources[0].events;
+    const reply = await (await submit({ requestId: randomUUID(), projectId: "game-box", message: "你好" }, "message")).json();
+    assert.equal(reply.action, "reply");
+    assert.equal(state().sources[0].events, eventCount);
+    const c = await (await submit({ requestId: randomUUID(), projectId: "game-box", message: "修改说明" }, "message")).json();
+    assert.equal(c.status, "submitted", JSON.stringify(c));
+    const worker = hubClient(hubUrl, hubRuntime.addKey("worker", "offline-worker"));
+    for (const [result, cwd, type] of [
+      [a, home, "router.task.direct"],
+      [b, added.cwd, "router.project.game-box.plan"],
+      [c, added.cwd, "router.project.game-box.direct"],
+    ]) {
+      const { job } = await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true });
+      assert.equal(job.run, result.run.id);
+      assert.equal(job.rule.cwd, cwd);
+      assert.equal(job.context.events[0].type, type);
+      await worker.result(job.run, job.token, { outcome: "done" });
+    }
+    const beforeFailures = state().sources[0].events;
+    for (const patch of [{ projectId: "../game-box" }, { projectId: "missing" }, { cwd: home }, { needsPlan: "true" }]) {
+      assert.ok((await submit({ ...plan, requestId: randomUUID(), ...patch })).status >= 400);
+    }
+    const invalidProjects: [typeof rule[], RegExp][] = [
+      [[rule, { ...added, cwd: join(home, "missing") }], /工作目录/],
+      [[{ ...rule, when: { ...rule.when, types: ["router.*"] } }, added], /其他规则/],
+    ];
+    for (const [badRules, error] of invalidProjects) {
+      await save({ ...rules, rules: badRules });
+      assert.match((await projects()).projects.find((project: { id: string }) => project.id === "game-box").error, error);
+      assert.match((await (await submit({ ...plan, requestId: randomUUID() })).json()).error, error);
+    }
+    const stale = join(home, "stale.json");
+    await writeFile(stale, JSON.stringify({ ...rules, rules: [rule, added] }));
+    process.env.AGENT_AUTOLOOP_RULES = stale;
+    try { assert.match((await (await submit({ ...plan, requestId: randomUUID() })).json()).error, /中台当前生效/); }
+    finally { process.env.AGENT_AUTOLOOP_RULES = file; }
+    assert.equal(state().sources[0].events, beforeFailures);
+  } finally { await save(rules); }
 });

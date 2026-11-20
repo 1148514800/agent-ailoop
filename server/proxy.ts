@@ -170,14 +170,16 @@ export function createConsole(options: {
         const csrf = req.headers["x-console-csrf"];
         if (typeof csrf !== "string" || !equal(csrf, session.csrf)) throw new RequestError(403, "页面验证已失效，请刷新后重试。");
       }
-      if (req.method === "POST" && url.pathname === "/api/router/message" && !url.search) {
+      const routerProjects = req.method === "GET" && url.pathname === "/api/router/projects";
+      const routerSubmit = req.method === "POST" && ["/api/router/message", "/api/router/task"].includes(url.pathname);
+      if ((routerProjects || routerSubmit) && !url.search) {
         if (!options.router) throw new RouterError(503, "控制台未加载 AI Router。");
-        const body = await readObject(req);
         const gone = new AbortController();
         res.once("close", () => gone.abort());
         const signal = AbortSignal.any([gone.signal, session.stop.signal,
           AbortSignal.timeout(Math.max(1, session.until - Date.now()))]);
-        const result = await options.router(body, signal);
+        const result = routerProjects ? await options.router.projects(signal)
+          : await options.router(await readObject(req), signal, url.pathname.endsWith("/task") ? "direct" : "auto");
         if (!res.destroyed) json(res, 200, result);
         return;
       }
