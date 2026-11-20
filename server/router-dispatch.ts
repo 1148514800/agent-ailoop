@@ -1,23 +1,20 @@
-import { createHash } from "node:crypto";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { eventRule, typeMatches } from "../agent-autoloop/kernel/rules.ts";
-import { parseRules, RulesError, rulesRevision } from "../agent-autoloop/protocol/rules.ts";
+import { rulesRevision } from "../agent-autoloop/protocol/rules.ts";
 import { ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
 import type { ExecuteDecision, RouterMode, RouterProject, RouterReply, RouterResult } from "../shared/router.ts";
-import type { RunState } from "../shared/types.ts";
+import type { RunState, State } from "../shared/types.ts";
 import type { Hub } from "./hub.ts";
 import { routerRecords } from "./router-records.ts";
 import { classify, RouterError } from "./router.ts";
 import type { routerConfig } from "./router.ts";
 
-const PROJECT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const PROJECT_PREFIX = "ai-project-";
-const validProject = (id: unknown): id is string => typeof id === "string" && id.length <= 42 && PROJECT.test(id);
-const ruleName = (id: string) => id === "default" ? "ai-router" : PROJECT_PREFIX + id;
-const eventPrefix = (id: string) => id === "default" ? "router.task" : "router.project." + id;
-const dataHome = () => process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(), ".agent-autoloop");
+import { configSnapshot, dataHome, digest, eventPrefix, loadRules, metadataFile, PROJECT_PREFIX,
+  readProjectMetadata, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
+import { projectManagement } from "./router-project-management.ts";
+
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const STATES = new Set<RunState>(["queued", "claimed", "unknown", "done", "nothing", "cancelled"]);
 const CACHE_LIMIT = 256;
@@ -32,22 +29,6 @@ type EventOutcome = {
   event: number; paused: string[]; routed: string[];
   runs: { run: number; rule: string; state: RunState; attempts: number; summary: string | null; error: string | null }[];
 };
-
-async function loadRules() {
-  const file = process.env.AGENT_AUTOLOOP_RULES
-    ?? join(dataHome(), "rules.json");
-  try {
-    return parseRules(await readFile(file, "utf8"), Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new RouterError(503, "本机找不到 rules.json，请先配置 ai-router 规则。任务未提交。");
-    }
-    if (error instanceof RulesError && error.issues.some((issue) => /^规则「ai-(?:router|project-[a-z0-9-]+)」的 to 不是已登记的 Agent/.test(issue))) {
-      throw new RouterError(409, "项目规则的 to 必须指向已登记的 Agent。任务未提交。");
-    }
-    throw new RouterError(503, "无法读取有效的 rules.json，请运行 npm run hub -- check。任务未提交。");
-  }
-}
 
 async function hubRequest<T>(hub: Hub, path: string, key: string, signal: AbortSignal, submission?: EventSubmission): Promise<T> {
   try {
@@ -116,18 +97,22 @@ async function validateProject(rules: Rules, id: string, source: string) {
   return digest(JSON.stringify([resolved, rule.to, rules.agents[rule.to]]));
 }
 
-async function guardRevision(hub: Hub, rules: Rules, signal: AbortSignal) {
-  const active = await hubRequest<{ rulesRevision?: string }>(hub, "/v1/state", hub.owner, signal);
+async function activeState(hub: Hub, signal: AbortSignal) {
+  const active = await hubRequest<State & { rulesRevision: string }>(hub, "/v1/state", hub.owner, signal);
   if (!active?.rulesRevision || !/^[a-f0-9]{64}$/.test(active.rulesRevision)) {
     throw new RouterError(503, "当前中台不支持规则版本校验，请用此项目附带的中台启动。任务未提交。");
   }
+  return active;
+}
+
+async function guardRevision(hub: Hub, rules: Rules, signal: AbortSignal) {
+  const active = await activeState(hub, signal);
   if (active.rulesRevision !== rulesRevision(rules)) {
     throw new RouterError(409, "中台当前生效的规则与本机文件不一致。请确认规则路径并等待中台加载。任务未提交。");
   }
-  return active.rulesRevision;
+  return active;
 }
 
-const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 const redactText = (text: string, secrets: string[]) => secrets.reduce((value, key) => value.replaceAll(key, "[已隐藏]"), text);
 export function createRouter(options: {
   config(): Promise<ReturnType<typeof routerConfig>>;
@@ -142,14 +127,20 @@ export function createRouter(options: {
   }
 
   async function projects(signal: AbortSignal) {
-    const [rules, hub] = await Promise.all([loadRules(), loadSource()]);
+    const [rules, hub, metadata] = await Promise.all([
+      loadRules(), loadSource(), configSnapshot(metadataFile(rulesFile())).then(readProjectMetadata),
+    ]);
     const revisionError = await guardRevision(hub, rules, signal).then(() => undefined, (error: RouterError) => error.message);
     const secrets = [hub.owner, hub.source.key, ...hub.secrets, await options.modelKey?.()]
       .filter((key): key is string => !!key).sort((a, b) => b.length - a.length);
     const entries = rules.rules.flatMap((rule): RouterProject[] => {
       const id = rule.name === "ai-router" ? "default" : rule.name.startsWith(PROJECT_PREFIX) ? rule.name.slice(PROJECT_PREFIX.length) : "";
       if (!validProject(id) || rule.name !== ruleName(id)) return [];
-      return [{ id, name: redactText(basename(rule.cwd) || rule.name, secrets), rule: rule.name }];
+      const entry = metadata.get(id);
+      if (entry?.removed) return [];
+      const managed = entry?.fingerprint === digest(JSON.stringify(rule));
+      return [{ id, name: redactText(managed ? entry.name : basename(rule.cwd) || rule.name, secrets), rule: rule.name,
+        ...(managed && { directory: redactText(rule.cwd, secrets) }) }];
     });
     entries.sort((a, b) => a.id === "default" ? -1 : b.id === "default" ? 1 : a.id.localeCompare(b.id));
     return { projects: await Promise.all(entries.map(async (entry) => {
@@ -235,25 +226,36 @@ export function createRouter(options: {
         }
       }
       if (eventId === undefined) {
+        const source = hub.source;
+        const file = rulesFile();
+        const dispatch = async (rules: Rules) => {
+          const route = await validateProject(rules, projectId, source.name);
+          const { rulesRevision: revision } = await guardRevision(hub, rules, signal);
+          saved ??= await store.bind({ digest: fingerprint, needsPlan: planning as boolean, target, route });
+          if (saved.digest !== fingerprint) throw changed();
+          if (saved.target !== target || saved.route !== route || saved.needsPlan === null) {
+            throw new RouterError(409, "该请求绑定的项目、Agent 或中台配置已变更，请核对原任务。");
+          }
+          planning = saved.needsPlan;
+          const type = eventPrefix(projectId) + (planning ? ".plan" : ".direct");
+          // If a response was lost, the hub checks this same source and external ID before inserting anything.
+          const accepted = await hubRequest<{ event: number }>(hub, "/v1/events", source.key, signal, {
+            source: source.name, revision,
+            body: { id: "router-" + id, type, subject: "task-" + id, summary: "AI Router 提交的任务", detail: message },
+          });
+          if (!Number.isSafeInteger(accepted?.event) || accepted.event < 1) {
+            throw new RouterError(502, "中台未返回有效事件编号。请保留原请求并重试。");
+          }
+          return store.confirm(accepted.event);
+        };
         const rules = await loadRules();
-        const route = await validateProject(rules, projectId, hub.source.name);
-        const revision = await guardRevision(hub, rules, signal);
-        saved ??= await store.bind({ digest: fingerprint, needsPlan: planning, target, route });
-        if (saved.digest !== fingerprint) throw changed();
-        if (saved.target !== target || saved.route !== route || saved.needsPlan === null) {
-          throw new RouterError(409, "该请求绑定的项目、Agent 或中台配置已变更，请核对原任务。");
-        }
-        planning = saved.needsPlan;
-        const type = eventPrefix(projectId) + (planning ? ".plan" : ".direct");
-        // If a response was lost, the hub checks this same source and external ID before inserting anything.
-        const accepted = await hubRequest<{ event: number }>(hub, "/v1/events", hub.source.key, signal, {
-          source: hub.source.name, revision,
-          body: { id: "router-" + id, type, subject: "task-" + id, summary: "AI Router 提交的任务", detail: message },
-        });
-        if (!Number.isSafeInteger(accepted?.event) || accepted.event < 1) {
-          throw new RouterError(502, "中台未返回有效事件编号。请保留原请求并重试。");
-        }
-        eventId = await store.confirm(accepted.event);
+        const entry = projectId === "default" ? undefined
+          : readProjectMetadata(await configSnapshot(metadataFile(file))).get(projectId);
+        eventId = entry ? await withProjectLock(file, signal, async () => {
+          const metadata = readProjectMetadata(await configSnapshot(metadataFile(file)));
+          if (metadata.get(projectId)?.removed) throw new RouterError(409, "该项目已从 AI Router 移除。任务未提交。");
+          return dispatch(await loadRules());
+        }) : await dispatch(rules);
       }
 
       const result = await hubRequest<EventOutcome>(hub, "/v1/events/" + eventId, hub.source.key, signal);
@@ -284,7 +286,9 @@ export function createRouter(options: {
     try { return await record.pending; }
     finally { record.pending = undefined; }
   }
-  return Object.assign(submit, { projects });
+  return Object.assign(submit, {
+    projects, ...projectManagement({ loadSource, activeState, guardRevision, validateProject, modelKey: options.modelKey }),
+  });
 }
 
 export type RouterHandler = ReturnType<typeof createRouter>;

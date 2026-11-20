@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -13,6 +13,8 @@ import { createConsole } from "../server/proxy.ts";
 import { loadHub } from "../server/hub.ts";
 import { createRouter } from "../server/router-dispatch.ts";
 import { routerConfig } from "../server/router.ts";
+import { parseRouterRules } from "../server/router-rule-config.ts";
+import { rulesRevision } from "../agent-autoloop/protocol/rules.ts";
 import { hubClient } from "../agent-autoloop/protocol/client.ts";
 
 const home = await mkdtemp(join(tmpdir(), "autoloop-router-test-"));
@@ -326,4 +328,122 @@ test("project discovery, dispatch and restart recovery preserve project and plan
     finally { process.env.AGENT_AUTOLOOP_RULES = file; }
     assert.equal(state().sources[0].events, beforeFailures);
   } finally { await save(rules); }
+});
+
+test("web projects load into the Hub, execute through registered agents and retire without removing records", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "router-managed-projects-"));
+  const directory = join(workspace, "existing");
+  await mkdir(directory);
+  const marker = join(directory, "keep.txt");
+  await writeFile(marker, "保留工程");
+  const file = process.env.AGENT_AUTOLOOP_RULES!;
+  const original = await readFile(file, "utf8");
+  const originalMode = (await stat(file)).mode & 0o777;
+  const list = () => fetch(base + "/api/router/projects", { headers: { cookie } }).then(r => r.json());
+  const headers = { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf };
+  const send = (path: string, body: object, requestHeaders = headers) => fetch(base + "/api/router/" + path, {
+    method: "POST", headers: requestHeaders, body: JSON.stringify(body),
+  });
+  const create = { name: "Game Box 扩展", directory, agentId: "lab" };
+  key = "";
+  const before = modelCalls;
+  try {
+    const unauth = await fetch(base + "/api/router/project-options");
+    assert.equal(unauth.status, 401);
+    const choices = await fetch(base + "/api/router/project-options", { headers: { cookie } }).then(r => r.json());
+    assert.deepEqual(choices.agents, [{ id: "lab", name: "试验" }]);
+    assert.equal((await send("projects", create, { ...headers, "x-console-csrf": "" })).status, 403);
+    assert.equal((await send("projects/remove", { projectId: "default" })).status, 400);
+    for (const patch of [
+      { directory: "relative" }, { directory: join(workspace, "missing") }, { directory: directory + "/../existing" },
+      { agentId: "other" }, { name: " " },
+    ]) assert.equal((await send("projects", { ...create, ...patch })).status, 400);
+    const link = join(workspace, "system");
+    await symlink(process.platform === "win32" ? process.env.SystemRoot! : "/etc", link, "junction");
+    assert.equal((await send("projects", { ...create, directory: link })).status, 400);
+    assert.equal(await readFile(file, "utf8"), original);
+
+    const duplicate = { ...create, name: "并发项目" };
+    const [made, other, also] = await Promise.all([
+      send("projects", create), send("projects", duplicate), send("projects", duplicate),
+    ]);
+    assert.equal(made.status, 200, JSON.stringify(await made.clone().json()));
+    assert.deepEqual([other.status, also.status].sort(), [200, 409]);
+    const { projectId } = await made.json();
+    assert.equal(projectId, "game-box");
+    assert.equal((await send("projects", { ...create, name: "Game Box" })).status, 409);
+    const current = await readFile(file, "utf8");
+    const blob = JSON.parse(current);
+    assert.deepEqual(blob.rules[0], JSON.parse(original).rules[0]);
+    assert.equal(blob.rules.length, 3);
+    const registered = blob.rules.find((rule: { name: string }) => rule.name === "ai-project-game-box");
+    assert.equal(registered.cwd, await realpath(directory));
+    assert.equal(registered.to, "lab");
+    assert.equal(registered.when.source, "workstation");
+    assert.equal((await stat(file)).mode & 0o777, originalMode);
+    assert.equal(state().rulesRevision, rulesRevision(parseRouterRules(current)));
+    assert.ok((await list()).projects.some((p: { id: string; name: string }) => p.id === projectId && p.name === create.name));
+
+    const task = { requestId: randomUUID(), projectId, message: "检查新项目", needsPlan: false };
+    const queued = await (await send("task", task)).json();
+    assert.ok(queued.run && queued.run.state === "queued", JSON.stringify(queued));
+    const remove = () => send("projects/remove", { projectId });
+    assert.match((await (await remove()).json()).error, /1 个未完成任务/);
+    const worker = hubClient(hubUrl, hubRuntime.addKey("worker", "offline-worker"));
+    const claim = async () => (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true })).job;
+    const job = await claim();
+    assert.equal(job.run, queued.run.id);
+    assert.equal(job.rule.cwd, await realpath(directory));
+    assert.match((await (await remove()).json()).error, /1 个未完成任务/);
+    await worker.result(job.run, job.token, { outcome: "done", summary: "验收通过", ask: [
+      { title: "确认", text: "继续吗", options: ["继续", "停止"] }
+    ] });
+    assert.match((await (await remove()).json()).error, /1 个待回答审批/);
+    const ownerClient = hubClient(hubUrl, owner);
+    const card = state().cards.find((card) => card.rule === registered.name)!;
+    await ownerClient.answer(card.id, { choice: 0 });
+    const follow = await claim();
+    assert.equal(follow.rule.name, registered.name);
+    await worker.result(follow.run, follow.token, { outcome: "done", later: [{
+      key: "project-review", at: new Date(Date.now() + 3600_000).toISOString(), about: "稍后复查"
+    }] });
+    assert.match((await (await remove()).json()).error, /1 个待复查事项/);
+    // Fire the review timer with the fixture clock.
+    const future = Date.now() + 3601_000;
+    hubRuntime.tick(future);
+    const due = hubRuntime.execute("claimNext", ["offline-worker", randomUUID()], future + 1);
+    assert.equal(due.rule.name, registered.name);
+    hubRuntime.execute("finish", [due.run, due.token, { outcome: "done" }], future + 2);
+    assert.equal((await remove()).status, 200);
+    assert.ok(!(await list()).projects.some((p: { id: string }) => p.id === projectId));
+    assert.equal(await readFile(file, "utf8"), current);
+    assert.equal(await readFile(marker, "utf8"), "保留工程");
+    assert.equal((await send("task", { ...task, requestId: randomUUID() })).status, 409);
+    assert.equal((await (await send("task", task)).json()).run.id, job.run);
+    assert.ok((await ownerClient.why(job.run)).length > 0);
+
+    const manual = JSON.parse(current);
+    manual.rules.push({ ...registered, name: "catch-other", when: { source: "workstation", types: ["router.project.conflict.*"] } });
+    await writeFile(file, JSON.stringify(manual));
+    assert.deepEqual(hubRuntime.reloadRules(), {});
+    const overlap = await send("projects", { ...create, name: "Conflict" });
+    assert.equal(overlap.status, 409);
+    assert.match((await overlap.json()).error, /其他规则/);
+    assert.equal((await send("projects/remove", { projectId: "catch-other" })).status, 409);
+    const alternate = join(home, "unwatched-rules.json");
+    await writeFile(alternate, JSON.stringify(manual));
+    process.env.AGENT_AUTOLOOP_RULES = alternate;
+    try {
+      const unconfirmed = await send("projects", { ...create, name: "Reload Proof" });
+      assert.equal(unconfirmed.status, 503);
+      assert.match((await unconfirmed.json()).error, /已保存，但未能确认中台加载/);
+      assert.ok(JSON.parse(await readFile(alternate, "utf8")).rules.some((r: { name: string }) => r.name === "ai-project-reload-proof"));
+      assert.ok(!state().lines.some((r) => r.name === "ai-project-reload-proof"));
+    } finally { process.env.AGENT_AUTOLOOP_RULES = file; }
+    assert.equal(modelCalls, before);
+  } finally {
+    await writeFile(file, original);
+    hubRuntime.reloadRules();
+    await rm(workspace, { recursive: true, force: true });
+  }
 });

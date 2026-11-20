@@ -368,6 +368,7 @@ dialog::backdrop { background: var(--overlay); }
 .router-limit { color: var(--red); }
 .router-controls { display: flex; flex-wrap: wrap; align-items: start; gap: 12px 18px; }
 .router-controls > .field { flex: 1 1 190px; min-width: 0; max-width: 300px; }
-.router-controls select { width: 100%; min-height: 39px; padding: 6px 10px; color: var(--text); background: var(--bg); border: 1px solid var(--strong-line); border-radius: var(--small-radius); }
+.router-controls select, .dialog .field select { width: 100%; min-height: 39px; padding: 6px 10px; color: var(--text); background: var(--bg); border: 1px solid var(--strong-line); border-radius: var(--small-radius); }
 .router-modes { display: flex; flex-wrap: wrap; gap: 8px 12px; min-width: 0; margin: 0; padding: 4px 0; color: var(--muted); border: 0; }
 .router-modes label { display: flex; gap: 5px; align-items: center; }
+.router-project-actions { display: flex; flex-wrap: wrap; gap: 6px; align-self: end; }

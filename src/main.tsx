@@ -122,7 +122,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
       <main className="content" id="main-content">
         {live.error && <ErrorLine>{live.error}{state && ` 当前显示 ${fmtDate(state.now, state.timezone, "full")} 的快照。`}</ErrorLine>}
         {pid === "settings" ? <Settings live={live} /> : state ? <>
-          {pid === "overview" && <Dashboard state={state} sendRouter={sendRouter} />}
+          {pid === "overview" && <Dashboard state={state} sendRouter={sendRouter} act={write} />}
           {pid === "runs" && <Runs key={live.generation} state={state} query={route.query} navigate={navigate} />}
           {pid === "rules" && <Rules state={state} name={route.detail} close={() => navigate("#rules")} act={write} choose={setAction}
             disabled={writeDisabled} resumed={resumed} setResumed={(name, pause) => setResumed((previous) => new Map(previous).set(name, pause))} />}
@@ -134,7 +134,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
             disabled={writeDisabled} />}
         </> : <>
           <Heading title={route.page.name} description="连接本机 Agent Autoloop 中台。" />
-          {pid === "overview" && <RouterPanel state={null} send={sendRouter} />}
+          {pid === "overview" && <RouterPanel state={null} send={sendRouter} act={write} />}
           <div className="panel">{live.error ? <Empty title="暂时无法读取中台" icon={Server}><Button icon={RefreshCw} onClick={() => void live.refresh()} busy={live.refreshing}>重新连接</Button></Empty>
             : <Empty title="正在加载中台状态" icon={LoaderCircle}>正在读取当前快照…</Empty>}</div>
         </>}

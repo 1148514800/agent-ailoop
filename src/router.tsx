@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Sparkles } from "lucide-react";
+import { Plus, Send, Sparkles } from "lucide-react";
 import { ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
 import type { RouterMode, RouterProject, RouterResult } from "../shared/router.ts";
 import type { State } from "../shared/types.ts";
 import { api, messageOf, runLabels, runStatus } from "./data.ts";
-import { Badge, Button, ErrorLine, Panel, TextLink } from "./ui.tsx";
+import { RouterProjectDialog } from "./router-project-dialog.tsx";
+import type { Act } from "./runs.tsx";
+import { Badge, Button, Confirm, ErrorLine, Notice, Panel, TextLink } from "./ui.tsx";
 
 type RouterSubmission = { requestId: string; message: string; projectId: string; needsPlan?: boolean };
 export type SendRouterMessage = (body: RouterSubmission, mode: RouterMode) => Promise<RouterResult>;
 type Draft = { body: RouterSubmission; mode: RouterMode; projectName: string };
 const modeLabel = { auto: "AI 自动判断", direct: "直接创建任务" };
 
-export function RouterPanel({ state, send }: { state: State | null; send: SendRouterMessage }) {
+export function RouterPanel({ state, send, act }: { state: State | null; send: SendRouterMessage; act: Act }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<RouterResult | null>(null);
@@ -24,6 +26,9 @@ export function RouterPanel({ state, send }: { state: State | null; send: SendRo
   const [projectError, setProjectError] = useState("");
   const [loading, setLoading] = useState(true);
   const [reload, setReload] = useState(0);
+  const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<RouterProject | null>(null);
+  const [notice, setNotice] = useState("");
   const [sent, setSent] = useState<Draft | null>(null);
   useEffect(() => {
     let current = true;
@@ -84,6 +89,10 @@ export function RouterPanel({ state, send }: { state: State | null; send: SendRo
             </option>)}
           </select>
         </label>
+        <div className="router-project-actions">
+          <Button icon={Plus} disabled={busy} onClick={() => { setNotice(""); setAdding(true); }}>添加项目</Button>
+          {project?.directory && <Button disabled={busy || loading} onClick={() => { setNotice(""); setRemoving(project); }}>移除项目</Button>}
+        </div>
         <fieldset className="router-modes" disabled={busy}>
           <legend>执行模式</legend>
           <label><input type="radio" name="router-mode" checked={mode === "auto"} onChange={() => setMode("auto")} />AI 自动判断</label>
@@ -92,7 +101,7 @@ export function RouterPanel({ state, send }: { state: State | null; send: SendRo
         </fieldset>
       </div>
       {(projectError || project?.error || (!loading && !projects.length)) && <div className="router-actions">
-        <ErrorLine>{projectError || project?.error || "请在中台 rules.json 注册目标项目。"}</ErrorLine>
+        <ErrorLine>{projectError || project?.error || "请先添加一个项目。"}</ErrorLine>
         <Button type="button" disabled={busy || loading} onClick={() => setReload((value) => value + 1)}>重新加载项目</Button>
       </div>}
       <label className="field">消息
@@ -104,7 +113,29 @@ export function RouterPanel({ state, send }: { state: State | null; send: SendRo
         <Button type="submit" icon={Send} variant="primary" busy={busy} disabled={!canSend}>{busy ? "处理中…" : mode === "direct" ? "创建任务" : "发送"}</Button>
       </div>
       {error && <ErrorLine>{error}</ErrorLine>}
+      {notice && <Notice>{notice}</Notice>}
     </form>
+    {adding && <RouterProjectDialog act={act} close={() => setAdding(false)} added={(id) => {
+      setAdding(false);
+      setLoading(true);
+      setProjectId(id);
+      setReload((value) => value + 1);
+      setNotice("项目已添加。");
+    }} />}
+    {removing && <Confirm disabled={false} close={() => setRemoving(null)} complete={(message) => {
+      setLoading(true);
+      setRemoving(null);
+      setReload((value) => value + 1);
+      setNotice(message);
+    }} action={{
+      title: "移除项目",
+      description: `将「${removing.name}」（${removing.directory}）从 AI Router 的目标项目中移除。工程文件、规则和历史记录会保留。`,
+      confirm: "确认移除", danger: true,
+      async run() {
+        await act("/router/projects/remove", { projectId: removing.id });
+        return "项目已从 AI Router 移除。";
+      },
+    }} />}
     {result && <div className="router-result" aria-live="polite">
       {sent && <div className="muted">{sent.projectName} · {modeLabel[sent.mode]}</div>}
       {result.action === "reply" ? <>

@@ -4,6 +4,7 @@ import type { Run, Spending, State } from "../shared/types.ts";
 import { agentName, amount, cost, fmtDate, runLabels, runStatus } from "./data.ts";
 import { Badge, Empty, Heading, Panel, TextLink } from "./ui.tsx";
 import { RouterPanel } from "./router.tsx";
+import type { Act } from "./runs.tsx";
 import type { SendRouterMessage } from "./router.tsx";
 
 export function RunBadge({ run }: { run: Run }) {
@@ -44,7 +45,7 @@ function UsageLine({ title, data, week }: { title: string; data: Spending; week:
   </div>;
 }
 
-export function Dashboard({ state, sendRouter }: { state: State; sendRouter: SendRouterMessage }) {
+export function Dashboard({ state, sendRouter, act }: { state: State; sendRouter: SendRouterMessage; act: Act }) {
   const t = state.totals;
   const online = state.agents.filter((a) => a.online).length;
   const due = [
@@ -63,7 +64,7 @@ export function Dashboard({ state, sendRouter }: { state: State; sendRouter: Sen
       <Metric icon={Check} label="已完成" tone="green" value={t.done} note={`今天完成 ${amount.format(t.doneToday)} 轮`} to="#runs?status=done" />
       <Metric icon={CircleHelp} label="待处理卡片" tone="orange" value={state.cards.length} note={`${state.cards.filter((card) => card.kind === "ask").length} 张需要回复`} to="#approvals" />
     </div>
-    <RouterPanel state={state} send={sendRouter} />
+    <RouterPanel state={state} send={sendRouter} act={act} />
     <div className="dashboard-grid">
       <div className="stack">
         <Panel title="用量与费用" icon={Zap} extra={<span className="subtle-label">按轮次完成时间</span>}>

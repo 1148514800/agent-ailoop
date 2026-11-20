@@ -90,9 +90,17 @@ AUTOLOOP_ROUTER_MODEL=你的模型名称
 2. 合并 [ai-router 规则示例](docs/ai-router.rule.json) 到本机 `rules.json` 的 `rules` 数组。用 `config.json` 的 `source.name` 替换示例的来源，并确认它在 `rules.json` 的 `sources` 中登记。把 `to` 指向现有 Agent，把 `cwd` 改成现有且已授权的工作目录。保留 `parallel: 1` 让每个请求使用独立事项。其他规则须避开 `router.task.direct` 和 `router.task.plan`。默认配置目录为 `~/.agent-autoloop`，可以用 `AGENT_AUTOLOOP_HOME` 指定目录，用 `AGENT_AUTOLOOP_RULES` 单独指定规则文件。中台和控制台使用同一份规则。
 3. 执行 `npm run hub -- check` 校验本机规则。运行中的中台会自动加载有效的规则修改。Router 派发需要本项目附带的中台版本，首次升级时请在轮次执行完毕后重启中台和控制台。macOS 可关闭旧实例后双击启动。如果旧实例由其他方式启动，先用对应方式退出，再从本项目启动。
 
-### 注册第二个项目
+### 在网页管理项目
 
-保留现有 `ai-router` 作为默认项目。在同一个 `rules.json` 的 `rules` 数组中添加下面的规则。将 `source` 和 `to` 换为本机已登记的来源和 Agent，`cwd` 填写实际工作目录。项目 ID 使用 1 到 42 个小写字母、数字或分隔用的连字符。`default` 留给 `ai-router`。
+在「运行总览 → AI Router」点击「添加项目」，填写名称和已有工程目录的绝对路径，再选择已注册的 Agent。保存后中台会热加载规则。控制台确认生效版本后刷新列表并选中新项目。本地路径须能在接单机器上使用。项目管理可以在没有模型密钥的情况下使用。
+
+从下拉框选中通过网页添加的项目后，点击「移除项目」。有未完成任务、待回答审批或待复查事项时，界面会说明原因。移除只取消在 AI Router 中的登记，工程、规则和历史仍可用。规则继续供已有任务、审批续办和外部来源使用。默认项目和手写规则由原配置管理。
+
+网页名称和移除状态保存在规则文件旁的 `rules.json.router-projects.json`。规则依旧决定执行目录、Agent 和权限。网页写入经同目录临时文件同步和原子替换，并在替换前核对磁盘版本。网页操作之间共用文件锁。保存后如果中台加载确认超时，控制台会给出提示，磁盘上的完整配置可供核对。
+
+### 手动配置规则
+
+保留现有 `ai-router` 作为默认项目。也可以在同一个 `rules.json` 的 `rules` 数组中手动添加下面的规则。将 `source` 和 `to` 换为本机已登记的来源和 Agent，`cwd` 填写实际工作目录。项目 ID 使用 1 到 42 个小写字母、数字或分隔用的连字符。`default` 留给 `ai-router`。
 
 ```json
 {
@@ -119,7 +127,8 @@ AUTOLOOP_ROUTER_MODEL=你的模型名称
 
 ### API 与数据流
 
-- `GET /api/router/projects` 返回项目 ID、目录名和规则名。规则或目录不可用时显示错误。
+- `GET /api/router/projects` 返回项目 ID、显示名称和规则名。网页管理的项目还返回供移除确认使用的目录。规则或目录不可用时显示错误。
+- `GET /api/router/project-options` 返回已登记的 Agent。用 `POST /api/router/projects` 提交 `name`、`directory`、`agentId` 添加项目，用 `POST /api/router/projects/remove` 提交 `projectId` 取消登记。
 - `POST /api/router/message` 接收 `requestId`、`message` 和可选的 `projectId`。省略项目时使用 `default`。模型仅接收系统提示词和消息，直接回答不会创建事件。
 - `POST /api/router/task` 接收 `requestId`、`projectId`、`message` 和布尔值 `needsPlan`。两个提交接口均需要本机浏览器会话、同源请求和 `X-Console-CSRF`，消息最多 4000 个 Unicode 字符。
 - 服务端把项目 ID 映射到可信规则，核对磁盘和生效规则版本后提交事件。中台匹配规则、创建轮次，Worker 从规则取 Agent 和 `cwd`。两种模式共用事件和轮次查询逻辑。任务响应包含 `eventId`、`status` 和关联的 `run`。

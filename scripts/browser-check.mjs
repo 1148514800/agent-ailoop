@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
 import { fixture } from "./fixture.mjs";
 
-const home = await mkdtemp(join(tmpdir(), "autoloop-console-"));
+const sandbox = await mkdtemp(join(tmpdir(), "autoloop-console-"));
+const home = join(sandbox, "hub");
+await mkdir(home);
 const screenshots = join(import.meta.dirname, "../docs/screenshots");
 const shot = process.argv.includes("--screenshots");
 let hub, server, browser, model;
@@ -26,7 +28,7 @@ const dispose = async () => {
     model.closeAllConnections();
     await stopped;
   }
-  await rm(home, { recursive: true, force: true });
+  await rm(sandbox, { recursive: true, force: true });
 };
 process.once("SIGINT", () => void dispose().finally(() => process.exit(130)));
 process.once("SIGTERM", () => void dispose().finally(() => process.exit(143)));
@@ -245,6 +247,32 @@ try {
   await hub.finish(direct, { outcome: "done", summary: "第二个项目执行完成。" });
   await routerPanel.getByText("第二个项目执行完成。", { exact: true }).waitFor();
 
+  const directory = join(sandbox, "managed");
+  await mkdir(directory);
+  await routerPanel.getByRole("button", { name: "添加项目", exact: true }).click();
+  const addProject = page.getByRole("dialog", { name: "添加项目" });
+  await addProject.getByLabel("项目名称").fill("网页项目");
+  await addProject.getByLabel("项目目录").fill(directory);
+  await addProject.getByLabel("执行 Agent").selectOption("router");
+  await addProject.getByRole("button", { name: "保存项目" }).click();
+  const registered = project.getByRole("option", { name: /网页项目/ });
+  await registered.waitFor({ state: "attached" });
+  assert.equal(await project.inputValue(), await registered.getAttribute("value"));
+  await taskInput.fill("检查网页添加的项目");
+  await taskButton.click();
+  await routerPanel.getByText("网页项目 · 直接创建任务", { exact: true }).waitFor();
+  await routerPanel.getByRole("button", { name: "移除项目", exact: true }).click();
+  const removeProject = page.getByRole("dialog", { name: "移除项目" });
+  await removeProject.getByText(/网页项目.*managed/).waitFor();
+  await removeProject.getByRole("button", { name: "确认移除" }).click();
+  await removeProject.getByRole("alert").getByText(/1 个未完成任务/).waitFor();
+  const job = (await hub.claimRouter()).job;
+  assert.equal(job.rule.cwd, await realpath(directory));
+  await hub.finish(job, { outcome: "done", summary: "网页项目执行完成。" });
+  await removeProject.getByRole("button", { name: "确认移除" }).click();
+  await registered.waitFor({ state: "detached" });
+  assert.equal(await project.inputValue(), "default");
+
   await navigate("Agent");
   await page.getByRole("heading", { name: "已配置 Agent" }).waitFor();
   assert.ok(await page.getByRole("row", { name: /巡检脚本.*离线/ }).count());
@@ -266,5 +294,5 @@ try {
   await restored;
   await page.getByRole("heading", { name: "运行设置" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、AI 自动判断、多项目选择，以及直接创建任务和断线重试。");
+  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、项目添加和移除、AI 自动判断、直接创建任务及断线重试。");
 } finally { await dispose(); }

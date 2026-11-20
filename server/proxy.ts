@@ -172,14 +172,23 @@ export function createConsole(options: {
       }
       const routerProjects = req.method === "GET" && url.pathname === "/api/router/projects";
       const routerSubmit = req.method === "POST" && ["/api/router/message", "/api/router/task"].includes(url.pathname);
-      if ((routerProjects || routerSubmit) && !url.search) {
+      const projectOptions = req.method === "GET" && url.pathname === "/api/router/project-options";
+      const projectChange = req.method === "POST" && ["/api/router/projects", "/api/router/projects/remove"].includes(url.pathname);
+      if ((routerProjects || routerSubmit || projectOptions || projectChange) && !url.search) {
         if (!options.router) throw new RouterError(503, "控制台未加载 AI Router。");
         const gone = new AbortController();
         res.once("close", () => gone.abort());
         const signal = AbortSignal.any([gone.signal, session.stop.signal,
           AbortSignal.timeout(Math.max(1, session.until - Date.now()))]);
-        const result = routerProjects ? await options.router.projects(signal)
-          : await options.router(await readObject(req), signal, url.pathname.endsWith("/task") ? "direct" : "auto");
+        let result;
+        if (routerProjects) result = await options.router.projects(signal);
+        else if (projectOptions) result = await options.router.projectOptions(signal);
+        else {
+          const body = await readObject(req);
+          result = projectChange
+            ? await options.router.changeProject(url.pathname.endsWith("/remove") ? "remove" : "create", body, signal)
+            : await options.router(body, signal, url.pathname.endsWith("/task") ? "direct" : "auto");
+        }
         if (!res.destroyed) json(res, 200, result);
         return;
       }
