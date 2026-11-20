@@ -4,6 +4,10 @@ import assert from "node:assert/strict";
 import { createServer, get } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createProjectFolderPicker } from "../server/project-folder-picker.ts";
 import { createConsole } from "../server/proxy.ts";
 
 async function listen(server: Server) {
@@ -78,4 +82,51 @@ test("a browser opens a local session without credentials and writes with CSRF, 
 
   assert.equal((await fetch(base + "/api/login", write({}, headers))).status, 404);
   assert.equal((await fetch(base + "/api/logout", write({}, headers))).status, 404);
+});
+
+test("folder browsing requires local authorization, validates the selection and opens one window at a time", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "router-folder-picker-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = join(root, "中文 工程 ' & $");
+  await mkdir(folder);
+  const opened = Promise.withResolvers<void>();
+  const select = Promise.withResolvers<string>();
+  let calls = 0;
+  const pickFolder = createProjectFolderPicker(async () => {
+    calls++;
+    if (calls === 1) {
+      opened.resolve();
+      return select.promise;
+    }
+    return calls === 2 ? null : join(root, "missing");
+  });
+  const server = createConsole({ pickFolder, loadHub: async () => { throw new Error("Unexpected Hub request"); } });
+  const base = await listen(server);
+  t.after(() => { select.resolve(folder); server.close(); server.closeAllConnections(); });
+  const session = await fetch(base + "/api/session");
+  const cookie = session.headers.get("set-cookie")!.split(";")[0];
+  const csrf = (await session.json()).csrf;
+  const url = base + "/api/router/projects/pick-folder";
+  const browse = (headers: Record<string, string> = {}, body: object = {}) => fetch(url, {
+    method: "POST",
+    headers: { cookie, origin: base, "x-console-csrf": csrf, "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+  assert.equal((await fetch(url, { headers: { cookie } })).status, 404);
+  assert.equal((await browse({ cookie: "" })).status, 401);
+  assert.equal((await browse({ "x-console-csrf": "" })).status, 403);
+  assert.equal((await browse({ origin: "https://elsewhere.invalid" })).status, 403);
+  assert.equal((await browse({}, { command: "invalid" })).status, 400);
+  assert.equal(calls, 0);
+
+  const first = browse();
+  await opened.promise;
+  assert.equal((await browse()).status, 409);
+  assert.equal(calls, 1);
+  select.resolve(folder);
+  assert.deepEqual(await (await first).json(), { directory: await realpath(folder) });
+  assert.deepEqual(await (await browse()).json(), { directory: null });
+  const invalid = await browse();
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /目录不存在/);
 });

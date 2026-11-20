@@ -6,6 +6,7 @@ import { once } from "node:events";
 import { Buffer } from "node:buffer";
 import { redact, safeFact } from "./hub.ts";
 import type { Hub } from "./hub.ts";
+import { pickProjectFolder } from "./project-folder-picker.ts";
 import { RouterError } from "./router.ts";
 import type { RouterHandler } from "./router-dispatch.ts";
 
@@ -122,6 +123,7 @@ async function pipeFacts(upstream: Response, res: ServerResponse, signal: AbortS
 
 export function createConsole(options: {
   loadHub(): Promise<Hub>; router?: RouterHandler;
+  pickFolder?: typeof pickProjectFolder;
   frontend?(req: IncomingMessage, res: ServerResponse): void | Promise<void>;
 }) {
   const sessions = new Map<string, Session>();
@@ -169,6 +171,19 @@ export function createConsole(options: {
       if (req.method === "POST") {
         const csrf = req.headers["x-console-csrf"];
         if (typeof csrf !== "string" || !equal(csrf, session.csrf)) throw new RequestError(403, "页面验证已失效，请刷新后重试。");
+      }
+      if (req.method === "POST" && url.pathname === "/api/router/projects/pick-folder" && !url.search) {
+        if (req.socket.remoteAddress !== "127.0.0.1" && req.socket.remoteAddress !== "::ffff:127.0.0.1") {
+          throw new RequestError(403, "文件夹选择只能从本机控制台打开。");
+        }
+        if (Object.keys(await readObject(req)).length) throw new RequestError(400, "文件夹选择无需参数。");
+        const gone = new AbortController();
+        res.once("close", () => gone.abort());
+        const signal = AbortSignal.any([gone.signal, session.stop.signal,
+          AbortSignal.timeout(Math.max(1, session.until - Date.now()))]);
+        const directory = await (options.pickFolder ?? pickProjectFolder)(signal);
+        if (!res.destroyed) json(res, 200, { directory });
+        return;
       }
       const routerProjects = req.method === "GET" && url.pathname === "/api/router/projects";
       const routerSubmit = req.method === "POST" && ["/api/router/message", "/api/router/task"].includes(url.pathname);

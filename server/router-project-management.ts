@@ -25,7 +25,7 @@ function contains(parent: string, child: string) {
   return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(".." + sep));
 }
 
-async function projectDirectory(input: string) {
+export async function projectDirectory(input: string) {
   if (!isAbsolute(input) || input.split(process.platform === "win32" ? /[/\\]/ : "/").includes("..") || /[\u0000-\u001f\u007f]/.test(input)) {
     throw new RouterError(400, "请输入不含路径回退的本机绝对目录。");
   }
