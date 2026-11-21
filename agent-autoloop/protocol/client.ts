@@ -31,8 +31,26 @@ export function hubClient(url: string, key: string) {
   }
   return {
     // The worker's door.
-    work({ claim, wait, running, capacity }: { claim: string; wait: number; running: number[]; capacity: boolean }) {
-      const query = { claim, wait: String(wait), running: running.join(","), capacity: capacity ? "1" : "0" };
+    work({
+      claim,
+      wait,
+      running,
+      capacity,
+      providers,
+    }: {
+      claim: string;
+      wait: number;
+      running: number[];
+      capacity: boolean;
+      providers?: boolean;
+    }) {
+      const query = {
+        claim,
+        wait: String(wait),
+        running: running.join(","),
+        capacity: capacity ? "1" : "0",
+        ...(providers && { providers: "1" }),
+      };
       return call("GET", `/v1/work?${new URLSearchParams(query)}`, { timeout: wait + 30 });
     },
     started: (run: number, token: string, body: { session?: string; link?: string }) =>

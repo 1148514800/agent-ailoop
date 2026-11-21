@@ -9,11 +9,13 @@ import { Button, ErrorLine } from "./ui.tsx";
 export const profileLabel: Record<ProfileChoice, string> = { auto: "自动选择", default: "默认配置", fast: "Fast", strong: "Strong" };
 
 export function configValue(config: ExecutionConfig | undefined, field: "model" | "effort") {
+  if (config?.use === "dsh" && field === "model" && !config.model) return "使用 DSH 内部默认模型";
   return config?.[field] ?? (config?.use === "codex" ? "继承 Codex CLI 默认" : "未知");
 }
 
 export function configSource(config: ExecutionConfig | undefined) {
   if (!config) return "未知";
+  if (config.use === "dsh") return config.model ? "执行方案" : "DSH 内部默认";
   if (config.use !== "codex") return config.model || config.effort ? "Autoloop" : "未知";
   if (config.model && config.effort) return "Autoloop";
   if (config.model || config.effort) return "Autoloop / Codex CLI 默认";
@@ -33,7 +35,7 @@ export function ModelDetails({ config }: { config: ExecutionConfig }) {
 
 const CUSTOM_MODEL = "!custom";
 
-function ModelPicker({ initial, models, disabled }: { initial: string; models: string[] | null; disabled: boolean }) {
+export function ModelPicker({ initial, models, disabled, defaultLabel = "继承 Codex CLI 默认", catalogLabel = "列表来自本机 Codex 缓存。" }: { initial: string; models: string[] | null; disabled: boolean; defaultLabel?: string; catalogLabel?: string }) {
   const id = useId();
   const [choice, setChoice] = useState(initial);
   const currentOutsideCatalog = choice && choice !== CUSTOM_MODEL && !models?.includes(choice);
@@ -43,7 +45,7 @@ function ModelPicker({ initial, models, disabled }: { initial: string; models: s
       <label htmlFor={id}>模型 ID</label>
       <select id={id} name={choice === CUSTOM_MODEL ? undefined : "model"} value={choice} disabled={disabled}
         onChange={(event) => setChoice(event.target.value)}>
-        <option value="">继承 Codex CLI 默认</option>
+        <option value="">{defaultLabel}</option>
         {currentOutsideCatalog && <option value={choice}>{choice}（当前配置）</option>}
         {models?.map((modelId) => <option key={modelId} value={modelId}>{modelId}</option>)}
         <option value={CUSTOM_MODEL}>自定义模型 ID…</option>
@@ -53,8 +55,8 @@ function ModelPicker({ initial, models, disabled }: { initial: string; models: s
       <input name="model" defaultValue={initial} maxLength={128} autoComplete="off" required disabled={disabled} />
     </label>}
     <p className="muted" aria-live="polite">{models === null ? "正在读取本机 Codex 模型列表…" :
-      models.length === 0 ? "本机暂无 Codex 模型列表，可选择自定义模型 ID。" :
-      "列表来自本机 Codex 缓存。"}</p>
+      models.length === 0 ? "可选择自定义模型 ID。" :
+      catalogLabel}</p>
   </>;
 }
 

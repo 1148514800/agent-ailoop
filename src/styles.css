@@ -381,3 +381,5 @@ dialog::backdrop { background: var(--overlay); }
 .router-model-details > div { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 2px 5px; }
 .router-model-details dt { color: var(--muted); }
 .router-model-details dd { margin: 0; }
+
+.local-agent-path { overflow-wrap: anywhere; }

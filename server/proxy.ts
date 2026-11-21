@@ -188,12 +188,16 @@ export function createConsole(options: {
       }
       const routerProjects = req.method === "GET" && url.pathname === "/api/router/projects";
       const routerSubmit = req.method === "POST" && ["/api/router/message", "/api/router/task"].includes(url.pathname);
+      const agentScan = req.method === "GET" && url.pathname === "/api/router/agents/scan";
+      const planList = req.method === "GET" && url.pathname === "/api/router/plans";
+      const planWrite = req.method === "POST" && ["/api/router/plans", "/api/router/plans/probe", "/api/router/plans/verify"].includes(url.pathname);
+      const registerAgent = req.method === "POST" && url.pathname === "/api/router/agents";
       const modelOptions = req.method === "GET" && url.pathname === "/api/router/model-options";
       const agentModels = req.method === "GET" && url.pathname === "/api/router/agent-models";
       const profileSave = req.method === "POST" && url.pathname === "/api/router/projects/profile";
       const projectOptions = req.method === "GET" && url.pathname === "/api/router/project-options";
       const projectChange = req.method === "POST" && ["/api/router/projects", "/api/router/projects/remove"].includes(url.pathname);
-      if ((routerProjects || routerSubmit || projectOptions || projectChange || agentModels || modelOptions || profileSave) && !url.search) {
+      if ((routerProjects || routerSubmit || projectOptions || projectChange || agentModels || modelOptions || profileSave || agentScan || registerAgent || planList || planWrite) && !url.search) {
         if (!options.router) throw new RouterError(503, "控制台未加载 AI Router。");
         const gone = new AbortController();
         res.once("close", () => gone.abort());
@@ -201,12 +205,18 @@ export function createConsole(options: {
           AbortSignal.timeout(Math.max(1, session.until - Date.now()))]);
         let result;
         if (agentModels) result = await options.router.agentModels(signal);
+        else if (planList) result = await options.router.listPlans(signal);
+        else if (agentScan) result = await options.router.agentScan(signal);
         else if (modelOptions) result = await options.router.modelOptions(signal);
         else if (routerProjects) result = await options.router.projects(signal);
         else if (projectOptions) result = await options.router.projectOptions(signal);
         else {
           const body = await readObject(req);
-          result = profileSave ? await options.router.changeProfile(body, signal) : projectChange
+          if (planWrite) {
+            if (url.pathname.endsWith("/probe")) result = await options.router.planProbe(body, signal);
+            else if (url.pathname.endsWith("/verify")) result = await options.router.verifyPlan(body, signal);
+            else result = await options.router.changePlan(body, signal);
+          } else result = registerAgent ? await options.router.registerAgent(body, signal) : profileSave ? await options.router.changeProfile(body, signal) : projectChange
             ? await options.router.changeProject(url.pathname.endsWith("/remove") ? "remove" : "create", body, signal)
             : await options.router(body, signal, url.pathname.endsWith("/task") ? "direct" : "auto");
         }

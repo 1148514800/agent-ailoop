@@ -303,7 +303,7 @@ function sweep(draft: Draft) {
   }
 }
 
-function claimNext(draft: Draft, worker: string, claim: string) {
+function claimNext(draft: Draft, worker: string, claim: string, providers = false) {
   const agents = agentsOf(draft.view, worker);
   const runs = rows(draft.view, "runs", { state: ["queued", "claimed"] });
   const claimed = runs.filter((run) => run.state === "claimed");
@@ -313,6 +313,7 @@ function claimNext(draft: Draft, worker: string, claim: string) {
     const rule = ruleNamed(draft, run.rule);
     // What was queued before a pause, or an answer that came in during one, waits for the resume.
     if (!rule || !agents.includes(rule.to) || pauseOf(draft.view, rule, draft.now)) return false;
+    if (rule.execution?.providerRef && !providers) return false;
     const agentLimit = draft.rules.agents[rule.to].maxActive;
     return (
       Date.parse(run.not_before) <= draft.now &&
@@ -324,6 +325,8 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   };
   // The same claim again means the answer got lost: it gets back the run it already has.
   const held = claimed.find((run) => run.claim === claim && workerOf(draft.view, run) === worker);
+  if (held && !providers && ruleOf(configuration(draft.view, held.rules_version), held.rule)?.execution?.providerRef)
+    return null;
   const run = held ?? runs.find(claimable);
   if (!run) return null;
   if (!held) {

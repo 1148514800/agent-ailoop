@@ -232,6 +232,7 @@ export function createWorker({
       cwd,
       model: agent.model,
       effort: agent.effort,
+      providerRef: agent.providerRef,
       tier: agent.tier,
       access: agent.access as Turn["access"],
       command: agent.command,
@@ -241,6 +242,7 @@ export function createWorker({
     };
     if (!existsSync(cwd)) throw new Error(`在 ${cwd} 启动不了：这个目录不存在`);
     const argv = adapter.command(turn);
+    const env = { ...agentEnvironment(entry), ...adapter.environment?.(turn) };
     const { out, err, exit, command } = files(entry);
     if (process.platform === "win32") {
       writeFileSync(command, JSON.stringify({ argv, cwd, exit }), { mode: 0o600 });
@@ -258,7 +260,7 @@ export function createWorker({
           ],
           {
             cwd,
-            env: { ...agentEnvironment(entry), AGENT_AUTOLOOP_NODE: process.execPath },
+            env: { ...env, AGENT_AUTOLOOP_NODE: process.execPath },
             detached: true,
             windowsHide: true,
             stdio: ["ignore", output, errors],
@@ -295,7 +297,7 @@ export function createWorker({
     const login = [process.env.SHELL ?? "/bin/sh", "-lc", 'exec /bin/sh "$AGENT_AUTOLOOP_COMMAND"'];
     const child = spawn("/bin/sh", ["-c", script, marker(entry), out, err, exit, ...login], {
       cwd,
-      env: { ...agentEnvironment(entry), AGENT_AUTOLOOP_COMMAND: command },
+      env: { ...env, AGENT_AUTOLOOP_COMMAND: command },
       detached: true,
       stdio: "ignore",
     });
@@ -343,7 +345,12 @@ export function createWorker({
   function read(entry: Entry, adapter: Adapter, code: number | null): Reading {
     const { out, err } = files(entry);
     try {
-      const reading = adapter.read(snapshot(out), code, code === null ? "" : snapshot(err));
+      const reading = adapter.read(
+        snapshot(out),
+        code,
+        code === null ? "" : snapshot(err),
+        entry.job.agent.providerRef,
+      );
       if (!reading) throw new Error("它什么也没给");
       return reading;
     } catch (error) {
@@ -587,6 +594,7 @@ export function createWorker({
         wait: held.length ? 1 : wait,
         running: held.map((entry) => entry.run),
         capacity: held.length < capacity,
+        providers: true,
       });
       for (const id of answer?.cancel ?? []) {
         const entry = held.find((entry) => entry.run === id);

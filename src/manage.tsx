@@ -1,3 +1,4 @@
+import { LocalAgents } from "./local-agents.tsx";
 import { useEffect, useState } from "react";
 import { Activity, Bot, CalendarClock, Clock3, GitFork, History, Link2, ListTodo, Pause as PauseIcon, Play, Radio, RotateCcw, Server, Settings2, ShieldCheck, Workflow } from "lucide-react";
 import type { Pause, Rule, State } from "../shared/types.ts";
@@ -125,7 +126,7 @@ export function Rules({ state, name, close, act, choose, disabled, resumed, setR
   </>;
 }
 
-export function Agents({ state }: { state: State }) {
+export function Agents({ state, act }: { state: State; act: Act }) {
   const [models, setModels] = useState<Record<string, ExecutionConfig>>({});
   const rulesRevision = state.rulesRevision;
   useEffect(() => {
@@ -149,6 +150,7 @@ export function Agents({ state }: { state: State }) {
         <td className="mono">{agent.totals.running}</td><td className="mono">{agent.totals.done}</td><td className="mono">{agent.totals.nothing}</td><td>{fmtDate(agent.seenAt, state.timezone)}</td>
       </tr>)}</tbody></table></div> : <Empty title="暂无已配置的 Agent" icon={Bot} />}
     </Panel>
+    <LocalAgents act={act} />
   </>;
 }
 

@@ -173,7 +173,7 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     token: credential(env, "run", run.id, run.issued),
     attempt: run.attempts + 1,
     rule: { name, cwd, skill, prompt, title, emits },
-    agent: { ...agent, id: run.agent },
+    agent: { ...agent, id: run.agent, ...(execution?.providerRef && { providerRef: execution.providerRef }) },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
     context: {

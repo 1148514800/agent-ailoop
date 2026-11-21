@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
-import type { ExecuteDecision, ExecutionProfile, ModelProfile, RouterReply } from "../shared/router.ts";
+import { TASK_TYPES, TOOL_CAPABILITIES } from "../shared/router.ts";
+import type { ExecuteDecision, ExecutionProfile, ModelProfile, RouterReply, TaskRequirements } from "../shared/router.ts";
 import { ROUTER_PROMPT } from "./router-prompt.ts";
 
 export class RouterError extends Error {
@@ -56,19 +57,30 @@ export async function localRouterKey(root: string) {
   return (await localRouterEnv(root).catch(() => process.env)).AUTOLOOP_ROUTER_API_KEY?.trim();
 }
 
-function decisionOf(content: string, profiles: readonly ExecutionProfile[]): Decision {
+export function parseRequirements(input: unknown): TaskRequirements | undefined {
+  if (!input || typeof input !== "object" || Object.keys(input).length !== 3) return undefined;
+  const { type, tools, complexity } = input as TaskRequirements;
+  if (!TASK_TYPES.includes(type) || (complexity !== "simple" && complexity !== "complex") ||
+      !Array.isArray(tools) || tools.length > TOOL_CAPABILITIES.length || !tools.every((tool) => TOOL_CAPABILITIES.includes(tool))) return undefined;
+  return { type, tools: [...new Set(tools)], complexity };
+}
+
+function decisionOf(content: string, profiles: readonly ExecutionProfile[], structured: boolean): Decision {
   const value = JSON.parse(content);
   if (!value || typeof value !== "object" ||
       typeof value.needs_plan !== "boolean" || typeof value.answer !== "string") throw new RouterError(502, BAD_OUTPUT);
-  const fields = Object.keys(value).sort().join(",");
+  const fields = Object.keys(value).filter((key) => key !== "requirements").sort().join(",");
   const basic = fields === "action,answer,needs_plan";
-  if (basic && value.action === "reply" && !value.needs_plan && value.answer.trim() && [...value.answer].length <= 1000) {
+  if (basic && !Object.hasOwn(value, "requirements") && value.action === "reply" && !value.needs_plan && value.answer.trim() && [...value.answer].length <= 1000) {
     return { action: "reply", needs_plan: false, answer: value.answer.trim() };
   }
   if (value.action === "execute" && value.answer === "") {
-    if (basic && profiles[0] === "default") return { action: "execute", needs_plan: value.needs_plan, answer: "" };
+    const requirements = parseRequirements(value.requirements);
+    if (!requirements && (structured || Object.hasOwn(value, "requirements"))) throw new RouterError(502, BAD_OUTPUT);
+    const decision: ExecuteDecision = { action: "execute", needs_plan: value.needs_plan, answer: "", ...(requirements && { requirements }) };
+    if (basic && (profiles[0] === "default" || requirements)) return decision;
     if (fields === "action,answer,execution_profile,needs_plan" && profiles.some((profile) => profile === value.execution_profile)) {
-      return { action: "execute", needs_plan: value.needs_plan, execution_profile: value.execution_profile, answer: "" };
+      return { ...decision, execution_profile: value.execution_profile };
     }
   }
   throw new RouterError(502, BAD_OUTPUT);
@@ -91,7 +103,7 @@ async function modelText(response: Response) {
 }
 
 export async function classify(
-  config: Config, message: string, signal: AbortSignal, request = fetch, timeoutMs = 15_000, available: readonly ModelProfile[] = [],
+  config: Config, message: string, signal: AbortSignal, request = fetch, timeoutMs = 15_000, available: readonly ModelProfile[] = [], structured = false,
 ): Promise<Decision> {
   const deadline = AbortSignal.timeout(timeoutMs);
   const profiles: readonly ExecutionProfile[] = available.length ? available : ["default"];
@@ -114,7 +126,7 @@ export async function classify(
       const choice = JSON.parse(raw)?.choices?.[0];
       if (typeof choice?.message?.content !== "string" || choice.message.tool_calls?.length ||
           choice.finish_reason === "length" || choice.finish_reason === "tool_calls") throw new Error();
-      return decisionOf(choice.message.content, profiles);
+      return decisionOf(choice.message.content, profiles, structured);
     } catch { throw new RouterError(502, BAD_OUTPUT); }
   } catch (error) {
     if (deadline.aborted) throw new RouterError(504, "Router 模型请求超时，任务未提交。");

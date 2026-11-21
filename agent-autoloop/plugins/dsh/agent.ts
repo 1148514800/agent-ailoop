@@ -4,6 +4,9 @@
 // start another turn, so only `final` says it's over. A resumed session keeps the permissions it was saved with unless told
 // otherwise, so they're given every time; nobody is there to approve anything, so a call that needs it is refused rather than
 // left waiting. It has no desktop session to open.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { HOME } from "../../host/home.ts";
 import { execFileSync } from "node:child_process";
 import { commandLine } from "../../host/command.ts";
 import { findProgram, tail, type Adapter, type Reading, type Usage } from "../../worker/agents.ts";
@@ -31,10 +34,26 @@ function stepUsage(reported: any): Usage | undefined {
   return Object.keys(step).length ? step : undefined;
 }
 
+function providerHome(ref: string) {
+  if (!/^[a-f0-9]{32}$/.test(ref)) throw new Error("DSH 供应商配置编号不正确");
+  return join(HOME, "dsh-routes", ref);
+}
+
+function providerKey(ref: string) {
+  try {
+    const data = JSON.parse(readFileSync(join(providerHome(ref), ".credentials.yaml"), "utf8"));
+    const key = data?.refs?.AUTOLOOP_DSH_API_KEY;
+    if (typeof key === "string" && key) return key;
+  } catch {}
+  throw new Error("本机 Worker 缺少该方案版本的 DSH API Key");
+}
+
 export default {
   command: (turn) => [
     turn.program ?? findProgram("dsh"),
-    "headless",
+    ...(turn.providerRef
+      ? ["--profile", "headless", "--patch", join(providerHome(turn.providerRef), "route.yml")]
+      : ["headless"]),
     "--json",
     "--permission-mode",
     PRESET[turn.access],
@@ -43,7 +62,25 @@ export default {
     ...(turn.resume ? ["--session-id", turn.resume] : []),
     turn.prompt,
   ],
-  read(stdout, code, stderr) {
+  environment(turn) {
+    if (!turn.providerRef) return {};
+    providerKey(turn.providerRef);
+    const home = providerHome(turn.providerRef);
+    try {
+      const patch = JSON.parse(readFileSync(join(home, "route.yml"), "utf8"));
+      const selection = patch.find((entry: { id: string }) => entry.id === "agent-default-model")?.config;
+      if (selection?.model !== turn.model || selection?.reasoningEffort !== turn.effort) throw new Error();
+    } catch {
+      throw new Error("本机 Worker 的 DSH 供应商配置缺失或与任务版本不一致");
+    }
+    return { DSH_HOME: home };
+  },
+  read(stdout, code, stderr, providerRef) {
+    if (providerRef) {
+      const key = providerKey(providerRef);
+      stdout = stdout.replaceAll(JSON.stringify(key).slice(1, -1), "[已隐藏]");
+      stderr = stderr.replaceAll(key, "[已隐藏]");
+    }
     let session: string | undefined;
     let final: { text?: unknown; reason?: { kind?: string; error?: { message?: string } } | null } | undefined;
     let failed: string | undefined;

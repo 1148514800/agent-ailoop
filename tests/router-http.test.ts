@@ -9,9 +9,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { createConsole } from "../server/proxy.ts";
 import { loadHub } from "../server/hub.ts";
-import { createRouter } from "../server/router-dispatch.ts";
 import { routerConfig } from "../server/router.ts";
 import { parseRouterRules } from "../server/router-rule-config.ts";
 import { rulesRevision } from "../agent-autoloop/protocol/rules.ts";
@@ -20,6 +18,9 @@ import { hubClient } from "../agent-autoloop/protocol/client.ts";
 const home = await mkdtemp(join(tmpdir(), "autoloop-router-test-"));
 process.env.AGENT_AUTOLOOP_HOME = home;
 process.env.AGENT_AUTOLOOP_RULES = join(home, "rules.json");
+// Set the fixture paths before loading any module that can import the bundled host.
+const { createConsole } = await import("../server/proxy.ts");
+const { createRouter } = await import("../server/router-dispatch.ts");
 const codexHome = join(home, "codex");
 process.env.CODEX_HOME = codexHome;
 await mkdir(codexHome);
@@ -46,10 +47,14 @@ const model = createServer(async (req, res) => {
   const [system, { content: message }] = JSON.parse(raw).messages;
   const useProfiles = system.content.includes("允许的执行档位：fast");
   const profile = message.includes("无权档位") ? "arbitrary-model" : message.includes("重构") ? "strong" : "fast";
+  const named = message.startsWith("方案测试");
+  const requirements = message.includes("研究") ? { type: "research", tools: [], complexity: "complex" }
+    : message.includes("浏览器") ? { type: "operation", tools: ["browser_use"], complexity: "simple" }
+      : { type: "coding", tools: [], complexity: "simple" };
   const decision = message === "你好" || message === "检查模型回应" ? {
     action: "reply", needs_plan: false, answer: message === "你好" ? "你好，有什么可以帮你？" : modelKey + " " + source,
   } : { action: "execute", needs_plan: message.includes("重构") || message.includes("简单但要规划"), answer: "",
-    ...(useProfiles && { execution_profile: profile }),
+    ...(useProfiles && { execution_profile: profile }), ...(named && { requirements }),
   };
   res.end(JSON.stringify({ choices: [{ message: { content: message === "非法" ? "bad json" : JSON.stringify(decision) } }] }));
 });
@@ -612,4 +617,125 @@ test("versioned profiles reach the Worker with the selected model, effort and pr
     await writeFile(disk, original);
     hubRuntime.reloadRules();
   }
+});
+
+test("named plans bind each Run to the selected agent revision and reject unverified computer tools", async () => {
+  const disk = process.env.AGENT_AUTOLOOP_RULES!;
+  const config = JSON.parse(await readFile(disk, "utf8"));
+  key = modelKey;
+  config.agents["fixture-dsh"] = { name: "DSH", use: "dsh", worker: "plans-worker", access: "read" };
+  config.agents["fixture-codex"] = { name: "Codex", use: "codex", worker: "plans-worker", access: "edit" };
+  await writeFile(disk, JSON.stringify(config));
+  assert.deepEqual(hubRuntime.reloadRules(), {});
+  const headers = { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf };
+  const send = async (path: string, body: object) => {
+    const response = await fetch(base + "/api/router/" + path, { method: "POST", headers, body: JSON.stringify(body) });
+    return { status: response.status, result: await response.json() };
+  };
+  const make = { id: "", name: "快速编程", agentId: "fixture-codex", model: "test-model", effort: "low",
+    tasks: ["coding"], complexity: "simple", projects: ["default"], enabled: true, priority: 50 };
+  const fast = await send("plans", make);
+  assert.equal(fast.status, 200, fast.result.error);
+  const research = { ...make, name: "深度研究", agentId: "fixture-dsh", model: "", effort: "",
+    tasks: ["research"], complexity: "complex" };
+  assert.equal((await send("plans", { ...research, model: "unsupported" })).status, 400);
+  const deep = await send("plans", research);
+  assert.equal(deep.status, 200, deep.result.error);
+
+  const request = { requestId: randomUUID(), projectId: "default", executionProfile: "auto", message: "方案测试 编程" };
+  const queued = await send("message", request);
+  assert.equal(queued.status, 200, queued.result.error);
+  assert.equal(queued.result.planName, make.name);
+  const researchRun = await send("message", { ...request, requestId: randomUUID(), message: "方案测试 研究" });
+  assert.equal(researchRun.status, 200, researchRun.result.error);
+  assert.equal(researchRun.result.planName, research.name);
+  const workerKey = hubRuntime.addKey("worker", "plans-worker");
+  await writeFile(join(home, "config.json"), JSON.stringify({ url: hubUrl, owner, source: { name: "workstation", key: source },
+    worker: { name: "plans-worker", key: workerKey } }));
+  const custom = { ...research, name: "DSH 网关", model: "partner/model", effort: "high", tasks: ["general"],
+    provider: { api: "openai-completions", baseURL: "https://gateway.invalid/v1", key: "test-provider-secret",
+      thinkingFormat: "deepseek", effortValue: "max" } };
+  const configured = await send("plans", custom);
+  assert.equal(configured.status, 200, configured.result.error);
+  const plans = await fetch(base + "/api/router/plans", { headers }).then((res) => res.text());
+  assert.ok(!plans.includes(custom.provider.key));
+  assert.ok(!(await readFile(disk, "utf8")).includes(custom.provider.key));
+  const customTask = await send("task", { ...request, requestId: randomUUID(), needsPlan: false,
+    executionProfile: "plan:" + configured.result.id, requirements: { type: "general", tools: [], complexity: "simple" } });
+  assert.equal(customTask.status, 200, customTask.result.error);
+  assert.equal(customTask.result.execution.model, custom.model);
+  assert.equal((await send("plans", { ...custom, id: configured.result.id, provider: {
+    ...custom.provider, key: "", baseURL: "https://different.invalid/v1",
+  } })).status, 400);
+  assert.equal((await send("plans", { ...custom, id: configured.result.id, effort: "low", provider: {
+    ...custom.provider, key: "", effortValue: "",
+  } })).status, 200);
+  const count = state().runs.length;
+  assert.equal((await send("message", { ...request, requestId: randomUUID(), message: "方案测试 操作浏览器" })).status, 409);
+  assert.equal((await send("task", { ...request, requestId: randomUUID(), needsPlan: false,
+    executionProfile: "plan:" + fast.result.id,
+    requirements: { type: "coding", tools: ["desktop_use"], complexity: "simple" } })).status, 409);
+  assert.equal((await send("plans/verify", { id: fast.result.id, runId: queued.result.run.id, tool: "browser_use" })).status, 409);
+  assert.equal(state().runs.length, count);
+
+  assert.equal((await send("plans", { ...make, id: fast.result.id, model: "another-model" })).status, 200);
+  assert.equal((await send("plans", { ...research, id: deep.result.id, enabled: false })).status, 200);
+  assert.equal((await send("message", request)).result.run.id, queued.result.run.id);
+  const worker = hubClient(hubUrl, workerKey);
+  const codex = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true })).job;
+  assert.equal(codex.run, queued.result.run.id);
+  assert.equal(codex.agent.id, "fixture-codex");
+  assert.equal(codex.agent.model, "test-model");
+  assert.equal(codex.agent.effort, "low");
+  assert.equal(codex.agent.access, "edit");
+  await worker.result(codex.run, codex.token, { outcome: "failed", error: "测试重试" });
+  const dsh = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true })).job;
+  assert.equal(dsh.run, researchRun.result.run.id);
+  assert.equal(dsh.agent.id, "fixture-dsh");
+  assert.equal(dsh.agent.model, undefined);
+  assert.equal(dsh.agent.access, "read");
+  await worker.result(dsh.run, dsh.token, { outcome: "done" });
+  const legacyWorker = await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true });
+  assert.equal(legacyWorker.job, null);
+  const customWorkerJob = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true, providers: true })).job;
+  assert.equal(customWorkerJob.run, customTask.result.run.id);
+  assert.equal(customWorkerJob.agent.model, custom.model);
+  assert.equal(customWorkerJob.agent.effort, "high");
+  const providerFolder = join(home, "dsh-routes", customWorkerJob.agent.providerRef!);
+  assert.ok((await readFile(join(providerFolder, "route.yml"), "utf8")).includes('"reasoningEffort": "high"'));
+  assert.ok(!(await readFile(join(providerFolder, "route.yml"), "utf8")).includes(custom.provider.key));
+  assert.equal((await stat(join(providerFolder, ".credentials.yaml"))).mode & 0o077, 0);
+  await worker.result(customWorkerJob.run, customWorkerJob.token, { outcome: "done" });
+  const now = Date.parse(state().runs.find((run) => run.id === codex.run)!.notBefore) + 10;
+  const retry = hubRuntime.execute("claimNext", ["plans-worker", randomUUID()], now);
+  assert.equal(retry.run, codex.run);
+  assert.equal(retry.agent.model, "test-model");
+  assert.equal(retry.agent.access, "edit");
+  hubRuntime.execute("finish", [retry.run, retry.token, { outcome: "done" }], now + 1);
+
+  await writeFile(join(home, "config.json"), JSON.stringify({ url: hubUrl, owner, source: { name: "workstation", key: source },
+    worker: { name: "plans-worker", key: workerKey } }));
+  const browserPlan = await send("plans", { ...make, name: "浏览器验证", tasks: ["operation"] });
+  assert.equal(browserPlan.status, 200, browserPlan.result.error);
+  const probe = await send("plans/probe", { id: browserPlan.result.id, projectId: "default", tool: "browser_use" });
+  assert.equal(probe.status, 200, probe.result.error);
+  const probeJob = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true })).job;
+  assert.equal(probeJob.run, probe.result.run.id);
+  const session = randomUUID();
+  await worker.result(probeJob.run, probeJob.token, { outcome: "done", session, summary: "声称工具已用" });
+  const verify = () => send("plans/verify", { id: browserPlan.result.id, runId: probeJob.run, tool: "browser_use" });
+  assert.equal((await verify()).status, 409);
+  const output = join(home, "worker", "runs", probeJob.run + "-1");
+  await mkdir(output, { recursive: true });
+  await writeFile(join(output, "stdout-1.log"), [
+    { type: "thread.started", thread_id: session },
+    { type: "item.completed", item: { type: "mcp_tool_call", server: "playwright", tool: "browser_snapshot", status: "completed", result: { content: [] } } },
+  ].map((record) => JSON.stringify(record)).join("\n"));
+  assert.deepEqual(await verify(), { status: 200, result: { capabilities: ["browser_use"] } });
+  const verifiedRun = await send("message", { ...request, requestId: randomUUID(), message: "方案测试 操作浏览器" });
+  assert.equal(verifiedRun.result.planName, "浏览器验证");
+  const browserJob = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true })).job;
+  assert.equal(browserJob.run, verifiedRun.result.run.id);
+  await worker.result(browserJob.run, browserJob.token, { outcome: "done" });
+
 });

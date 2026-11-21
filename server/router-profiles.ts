@@ -9,7 +9,7 @@ import { configSnapshot, digest, metadataFile, parseRouterRules, readProjectMeta
   replaceConfig, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
 import { RouterError } from "./router.ts";
 
-type Overrides = { model: string | null; effort: string | null };
+type Overrides = { model: string | null; effort: string | null; providerRef?: string };
 const modelId = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const profilePrompt = "对于 router.profile. 开头的任务事件，读取 context.json 的 detail 作为任务资料。.direct 表示直接处理并验证，.plan 表示先阅读项目并制定简短计划，再执行与验证。";
 
@@ -76,8 +76,8 @@ export function executionConfig(rules: Rules, agentId: string, override?: Overri
   if (!agent) return undefined;
   return {
     agent: agentId, name: agent.name, use: agent.use, worker: agent.worker,
-    model: override ? override.model : agent.model ?? null,
-    effort: override ? override.effort : agent.effort ?? null,
+    model: agent.use === "dsh" && !override?.providerRef ? null : override ? override.model : agent.model ?? null,
+    effort: agent.use === "dsh" && !override?.providerRef ? null : override ? override.effort : agent.effort ?? null,
     tier: agent.tier ?? null,
   };
 }

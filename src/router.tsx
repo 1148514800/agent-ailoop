@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Send, Settings2, Sparkles } from "lucide-react";
 import { MODEL_PROFILES, ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
-import type { ProfileChoice, RouterMode, RouterProject, RouterResult } from "../shared/router.ts";
+import type { ProfileChoice, RouterMode, RouterProject, RouterResult, TaskRequirements } from "../shared/router.ts";
 import type { State } from "../shared/types.ts";
 import { api, messageOf, runLabels, runStatus } from "./data.ts";
+import { PlanDialog, TaskFields, taskLabels } from "./execution-plans.tsx";
 import { ModelDetails, ModelProfileDialog, profileLabel } from "./router-models.tsx";
 import { RouterProjectDialog } from "./router-project-dialog.tsx";
 import type { Act } from "./runs.tsx";
 import { Badge, Button, Confirm, ErrorLine, Notice, Panel, TextLink } from "./ui.tsx";
 
-type RouterSubmission = { requestId: string; message: string; projectId: string; needsPlan?: boolean; executionProfile: ProfileChoice };
+type RouterSubmission = { requestId: string; message: string; projectId: string; needsPlan?: boolean; executionProfile: ProfileChoice; requirements?: TaskRequirements };
 export type SendRouterMessage = (body: RouterSubmission, mode: RouterMode) => Promise<RouterResult>;
 type Draft = { body: RouterSubmission; mode: RouterMode; projectName: string };
 const modeLabel = { auto: "AI 自动判断", direct: "直接创建任务" };
@@ -25,6 +26,8 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
   const [mode, setMode] = useState<RouterMode>("auto");
   const [choice, setChoice] = useState<ProfileChoice>("auto");
   const [classifierModel, setClassifierModel] = useState<string | null>(null);
+  const [editingPlans, setEditingPlans] = useState(false);
+  const [requirements, setRequirements] = useState<TaskRequirements>({ type: "general", tools: [], complexity: "simple" });
   const [editingProfile, setEditingProfile] = useState(false);
   const [needsPlan, setNeedsPlan] = useState(false);
   const [projectError, setProjectError] = useState("");
@@ -49,9 +52,11 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
     return () => { current = false; };
   }, [reload, state?.rulesRevision]);
   const project = projects.find((item) => item.id === projectId);
-  const selected = choice === "fast" || choice === "strong" ? project?.profiles?.[choice] : project?.execution;
+  const chosenPlan = project?.plans?.find((plan) => "plan:" + plan.id === choice);
+  const selected = choice.startsWith("plan:") ? chosenPlan?.execution
+    : choice === "fast" || choice === "strong" ? project?.profiles?.[choice] : project?.execution;
   const count = [...text].length;
-  const canSend = !!project && !project.error && !projectError && !loading && !!text.trim() && count <= ROUTER_MESSAGE_LIMIT && (choice !== "fast" && choice !== "strong" || !!selected);
+  const canSend = !!project && !project.error && !projectError && !loading && !!text.trim() && count <= ROUTER_MESSAGE_LIMIT && !!selected;
   const activeRun = result?.action === "execute" ? result.run : null;
   const current = activeRun && state?.runs.find((run) => run.id === activeRun.id);
   const run = current || activeRun;
@@ -78,10 +83,12 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
       event.preventDefault();
       if (!canSend || busy || !project) return;
       const plan = mode === "direct" ? needsPlan : undefined;
+      const declared = mode === "direct"
+        ? { ...requirements, complexity: needsPlan ? "complex" as const : "simple" as const } : undefined;
       const previous = request.current;
       const pending = previous?.body.message === text && previous.body.projectId === projectId &&
-        previous.mode === mode && previous.body.needsPlan === plan && previous.body.executionProfile === choice ? previous : {
-          mode, projectName: project.name, body: { requestId: crypto.randomUUID(), message: text, projectId, needsPlan: plan, executionProfile: choice },
+        previous.mode === mode && previous.body.needsPlan === plan && previous.body.executionProfile === choice && JSON.stringify(previous.body.requirements) === JSON.stringify(declared) ? previous : {
+          mode, projectName: project.name, body: { requestId: crypto.randomUUID(), message: text, projectId, needsPlan: plan, executionProfile: choice, requirements: declared },
         };
       request.current = pending;
       void submit(pending);
@@ -98,6 +105,7 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
         <div className="router-project-actions">
           <Button icon={Plus} disabled={busy} onClick={() => { setNotice(""); setAdding(true); }}>添加项目</Button>
           {project?.execution?.use === "codex" && <Button icon={Settings2} disabled={busy || loading} onClick={() => setEditingProfile(true)}>模型档位设置</Button>}
+          <Button icon={Settings2} disabled={busy || loading || !projects.length} onClick={() => setEditingPlans(true)}>执行方案</Button>
           {project?.directory && <Button disabled={busy || loading} onClick={() => { setNotice(""); setRemoving(project); }}>移除项目</Button>}
         </div>
         <fieldset className="router-modes" disabled={busy}>
@@ -113,17 +121,23 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
             {MODEL_PROFILES.map((profile) => <option key={profile} value={profile} disabled={!project?.profiles?.[profile]}>
               {profileLabel[profile]}{project?.profiles?.[profile] ? "" : "（未配置）"}
             </option>)}
+            {project?.plans?.map((item) => <option key={item.id} value={"plan:" + item.id}>{item.name}</option>)}
           </select>
         </label>
       </div>
+      {mode === "direct" && <fieldset className="router-modes" disabled={busy}>
+        <legend>任务要求</legend><TaskFields requirements={requirements} change={setRequirements} />
+      </fieldset>}
       {project?.execution && <div className="router-config">
         {mode === "auto" && <div><strong>Router 分类模型</strong><span>{classifierModel ?? "未配置或不可用"}</span></div>}
-        {choice === "auto" && MODEL_PROFILES.some((profile) => project.profiles?.[profile])
+        {choice === "auto" && !!project.plans?.length
+          ? <span>按任务类型和已验证的工具能力选择执行方案</span>
+          : choice === "auto" && MODEL_PROFILES.some((profile) => project.profiles?.[profile])
           ? MODEL_PROFILES.flatMap((profile) => {
             const config = project.profiles?.[profile];
             return config ? [<div key={profile}><strong>{profileLabel[profile]}</strong><ModelDetails config={config} /></div>] : [];
           })
-          : selected && <div><strong>{choice === "auto" ? "默认配置" : profileLabel[choice]}</strong><ModelDetails config={selected} /></div>}
+          : selected && <div><strong>{chosenPlan?.name ?? (choice === "auto" ? "默认配置" : choice === "fast" || choice === "strong" ? profileLabel[choice] : profileLabel.default)}</strong><ModelDetails config={selected} /></div>}
       </div>}
       {(projectError || project?.error || (!loading && !projects.length)) && <div className="router-actions">
         <ErrorLine>{projectError || project?.error || "请先添加一个项目。"}</ErrorLine>
@@ -140,6 +154,10 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
       {error && <ErrorLine>{error}</ErrorLine>}
       {notice && <Notice>{notice}</Notice>}
     </form>
+    {editingPlans && <PlanDialog projects={projects} act={act} close={() => setEditingPlans(false)} changed={() => {
+      setChoice(mode === "auto" ? "auto" : "default");
+      setReload((value) => value + 1);
+    }} />}
     {editingProfile && project && <ModelProfileDialog project={project} act={act} close={() => setEditingProfile(false)} saved={(profile) => {
       setEditingProfile(false);
       setLoading(true);
@@ -181,7 +199,8 @@ export function RouterPanel({ state, send, act }: { state: State | null; send: S
           {run && <TextLink to={"#runs/" + run.id}>查看第 {run.id} 轮</TextLink>}
         </div>
         {result.execution && <div className="router-config">
-          <div><strong>选择档位</strong><span>{profileLabel[result.execution_profile ?? "default"]}</span></div>
+          <div><strong>选择档位</strong><span>{result.planName ?? (result.execution_profile === "fast" || result.execution_profile === "strong" ? profileLabel[result.execution_profile] : profileLabel.default)}</span></div>
+          {result.requirements && <div><strong>任务类型</strong><span>{taskLabels[result.requirements.type]}</span></div>}
           <div><strong>先规划</strong><span>{result.needs_plan ? "是" : "否"}</span></div>
           <ModelDetails config={result.execution} />
         </div>}

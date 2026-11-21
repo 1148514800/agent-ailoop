@@ -167,10 +167,11 @@ async function work(call: Call) {
   const running = (url.searchParams.get("running") ?? "").split(",").filter((id) => POSITIVE_ID.test(id));
   act(call, "heartbeat", worker, running.map(Number));
   const until = waitUntil(call);
+  const providers = url.searchParams.get("providers") === "1";
   for (;;) {
     if (!whose(services.view(), "worker", token)) throw new AuthError("密钥已失效");
     const wantsWork = !request.signal.aborted && url.searchParams.get("capacity") !== "0";
-    const job = wantsWork ? act(call, "claimNext", worker, claim) : null;
+    const job = wantsWork ? act(call, "claimNext", worker, claim, providers) : null;
     const cancel = cancels(services.view(), worker);
     if (job || cancel.length || services.now() >= until || request.signal.aborted) return json({ job, cancel });
     await services.wait(until, request.signal);

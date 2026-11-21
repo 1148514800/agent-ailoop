@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type Hub = { url: string; owner: string; secrets: string[]; source?: { name: string; key: string } };
+export type Hub = { url: string; owner: string; secrets: string[]; localWorker?: string; source?: { name: string; key: string } };
 
 export async function loadHub(): Promise<Hub & { localService: boolean }> {
   const file = join(process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(), ".agent-autoloop"), "config.json");
@@ -32,6 +32,7 @@ export async function loadHub(): Promise<Hub & { localService: boolean }> {
     url,
     owner: config.owner,
     source,
+    localWorker: typeof config.worker?.name === "string" && config.worker.key ? config.worker.name : undefined,
     secrets: keys.filter((value): value is string => typeof value === "string" && value.length > 0),
     localService: typeof config.hub?.listen === "string",
   };

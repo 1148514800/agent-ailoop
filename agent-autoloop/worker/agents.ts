@@ -18,6 +18,7 @@ export type Turn = {
   cwd: string;
   model?: string;
   effort?: string;
+  providerRef?: string;
   /** The service tier to run at, in the agent program's own words; plugins whose program has none ignore it. */
   tier?: string;
   access: Access;
@@ -43,8 +44,9 @@ export type Reading = {
 export type Adapter = {
   /** Its command line for this turn. */
   command(turn: Turn): string[];
+  environment?(turn: Turn): NodeJS.ProcessEnv;
   /** What its output says so far. `code` is null while it's still running or when it died without saying. */
-  read(stdout: string, code: number | null, stderr: string): Reading;
+  read(stdout: string, code: number | null, stderr: string, providerRef?: string): Reading;
   /** Where a person can open this session. */
   link?(session: string): string;
   /** Whether it's installed and signed in, as `program` if its rules name one: what's wrong, in words a person can act on, or nothing. */

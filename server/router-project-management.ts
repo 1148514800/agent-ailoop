@@ -8,6 +8,7 @@ import type { Hub } from "./hub.ts";
 import { configSnapshot, dataHome, digest, eventPrefix, loadRules, metadataFile, parseRouterRules, PROJECT_PREFIX,
   readProjectMetadata, replaceConfig, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
 import { RouterError } from "./router.ts";
+import { isPlanRule } from "./execution-plans.ts";
 import { isProjectProfile } from "./router-profiles.ts";
 
 type SourceHub = Hub & { source: NonNullable<Hub["source"]> };
@@ -111,7 +112,7 @@ export function projectManagement(deps: {
           throw new RouterError(409, "只能移除由网页添加且仍由网页管理的项目。");
         }
         if (entry.removed) return { projectId: id };
-        const related = (name: string) => name === rule.name || isProjectProfile(name, id);
+        const related = (name: string) => name === rule.name || isProjectProfile(name, id) || isPlanRule(name, id);
         const lines = active.lines?.filter((line) => related(line.id)) ?? [];
         const totals = lines.flatMap(({ totals }) => totals ? [totals.queued, totals.running, totals.unknown] : [NaN]);
         if (!lines.some((line) => line.id === rule.name) || !Array.isArray(active.cards) || !Array.isArray(active.timers) ||

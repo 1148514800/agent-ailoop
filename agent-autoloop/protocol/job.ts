@@ -10,6 +10,7 @@ export type Job = {
     use: string;
     model?: string;
     effort?: string;
+    providerRef?: string;
     tier?: string;
     access: string;
     command?: string[];

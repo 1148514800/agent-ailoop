@@ -126,7 +126,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
           {pid === "runs" && <Runs key={live.generation} state={state} query={route.query} navigate={navigate} />}
           {pid === "rules" && <Rules state={state} name={route.detail} close={() => navigate("#rules")} act={write} choose={setAction}
             disabled={writeDisabled} resumed={resumed} setResumed={(name, pause) => setResumed((previous) => new Map(previous).set(name, pause))} />}
-          {pid === "agents" && <Agents state={state} />}
+          {pid === "agents" && <Agents state={state} act={write} />}
           {pid === "approvals" && <Approvals key={live.generation} state={state} act={write} disabled={writeDisabled} id={detailId} navigate={navigate} />}
           {pid === "events" && <EventFeed facts={live.facts} state={state} connection={live.stream} />}
           {pid === "runs" && detailId && <RunDetail key={detailId} id={detailId} state={state} facts={live.facts} act={write}

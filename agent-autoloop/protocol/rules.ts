@@ -113,6 +113,12 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, where + "的 execution", rule.execution, [
       ["model", inherited, "要是非空文字或 null"],
       ["effort", inherited, "要是非空文字或 null"],
+      [
+        "providerRef",
+        (value) => typeof value === "string" && /^[a-f0-9]{32}$/.test(value),
+        "要是本机供应商配置编号",
+        true,
+      ],
       ["pauseWith", (value) => isText(value) && value !== name, "要是另一条规则的名字", true],
     ]);
   }

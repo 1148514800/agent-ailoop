@@ -23,7 +23,7 @@ type RuleOptions = RuleWords & {
   maxActive?: number;
   resume?: boolean;
   emits?: EventFilter;
-  execution?: { model: string | null; effort: string | null; pauseWith?: string };
+  execution?: { model: string | null; effort: string | null; pauseWith?: string; providerRef?: string };
 };
 /** Without channels a rule's cards reach the default ones, or every channel if there are none; with them, only those. */
 type Reach = { channels?: string[] };
