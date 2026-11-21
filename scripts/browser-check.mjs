@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -19,9 +20,18 @@ await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({
     { slug: "other-test-model", visibility: "list" },
   ],
 }));
-const screenshots = join(import.meta.dirname, "../docs/screenshots");
+const screenshots = process.env.AUTOLOOP_TEST_SCREENSHOTS || join(import.meta.dirname, "../docs/screenshots");
 const shot = process.argv.includes("--screenshots");
-let hub, server, browser, model;
+const dshHome = join(sandbox, "dsh");
+const dshProfile = join(dshHome, "profiles", "desktop");
+await mkdir(dshProfile, { recursive: true });
+await writeFile(join(dshProfile, "cordis.patch.yml"), JSON.stringify([{ id: "llm-pi-ai", config: { providers: {
+  demo: { api: "openai-completions", baseURL: "https://example.invalid", apiKeyEnv: "DSH_DEMO_KEY", models: [
+    { id: "demo-research", reasoningEfforts: { high: "max" } }, { id: "demo-fast" },
+  ] },
+} } }]));
+await writeFile(join(dshHome, ".credentials.yaml"), JSON.stringify({ version: 1, refs: { DSH_DEMO_KEY: "browser-fixture-secret" } }), { mode: 0o600 });
+let hub, server, browser, model, probeServer;
 const dispose = async () => {
   await browser?.close();
   if (server && server.exitCode === null && server.signalCode === null) {
@@ -30,6 +40,12 @@ const dispose = async () => {
     await stopped;
   }
   await hub?.close();
+  if (probeServer?.listening) {
+    const stopped = once(probeServer, "close");
+    probeServer.close();
+    probeServer.closeAllConnections();
+    await stopped;
+  }
   if (model?.listening) {
     const stopped = once(model, "close");
     model.close();
@@ -45,7 +61,7 @@ async function start() {
   server = spawn(process.execPath, ["server/main.ts"], {
     cwd: join(import.meta.dirname, ".."),
     env: {
-      ...process.env, CODEX_HOME: codexHome, AGENT_AUTOLOOP_HOME: home, AUTOLOOP_CONSOLE_PORT: "0", AUTOLOOP_HUB_URL: "",
+      ...process.env, DSH_HOME: dshHome, CODEX_HOME: codexHome, AGENT_AUTOLOOP_HOME: home, AUTOLOOP_CONSOLE_PORT: "0", AUTOLOOP_HUB_URL: "",
       AUTOLOOP_ROUTER_ENABLED: "true", AUTOLOOP_ROUTER_BASE_URL: "http://127.0.0.1:" + model.address().port + "/v1",
       AUTOLOOP_ROUTER_API_KEY: "browser-mock-key", AUTOLOOP_ROUTER_MODEL: "fixture-model",
     },
@@ -352,6 +368,42 @@ try {
   await removeProject.getByRole("button", { name: "确认移除" }).click();
   await tierProject.waitFor({ state: "detached" });
 
+  await routerPanel.getByRole("button", { name: "执行方案", exact: true }).click();
+  const plans = page.getByRole("dialog", { name: "执行方案" });
+  await plans.getByLabel("方案名称").fill("本机研究模型");
+  await plans.getByLabel("绑定 Agent").selectOption("dsh");
+  await plans.getByLabel("DSH 供应商").selectOption("existing");
+  await plans.getByLabel("本机供应商").selectOption("desktop/demo");
+  await plans.getByLabel("模型 ID", { exact: true }).selectOption("demo-fast");
+  assert.equal(await plans.getByLabel("思考强度").locator("option").count(), 1);
+  await plans.getByLabel("模型 ID", { exact: true }).selectOption("demo-research");
+  await plans.getByLabel("思考强度").selectOption("high");
+  assert.equal(await plans.getByLabel("API Key", { exact: true }).count(), 0);
+  await plans.getByRole("checkbox", { name: "研究", exact: true }).check();
+  await plans.getByRole("checkbox", { name: /game-box/ }).first().check();
+  await plans.getByRole("button", { name: "保存方案" }).click();
+  await plans.getByText("执行方案已保存。").waitFor();
+  assert.equal(await plans.getByLabel("模型 ID", { exact: true }).inputValue(), "demo-research");
+  assert.equal(await plans.getByLabel("思考强度").inputValue(), "high");
+  await noOverflow(page);
+  await capture(page, "dsh-model-plan");
+  await plans.getByRole("button", { name: "关闭" }).click();
+
+  const { createConsole } = await import("../server/proxy.ts");
+  const { browserProbe } = await import("../server/browser-proof.ts");
+  probeServer = createConsole({ loadHub: async () => { throw new Error("test page requires no hub access"); } });
+  await new Promise((resolve) => probeServer.listen(0, "127.0.0.1", resolve));
+  const proof = browserProbe("http://127.0.0.1:" + probeServer.address().port, randomUUID());
+  const url = proof.message.match(/http:\/\/\S+?\/router-browser-check\/[a-f0-9]{32}/)?.[0];
+  const token = proof.message.match(/输入 ([a-f0-9]{32})/)?.[1];
+  assert.ok(url && token);
+  const proofPage = await context.newPage();
+  await proofPage.goto(url);
+  await proofPage.getByLabel("验证文本").fill(token);
+  await proofPage.getByRole("button", { name: "提交验证" }).click();
+  await proofPage.getByRole("heading", { name: "验证成功" }).waitFor();
+  await proofPage.close();
+
   await navigate("Agent");
   await page.getByRole("heading", { name: "已配置 Agent" }).waitFor();
   await page.getByRole("row", { name: /项目 Codex/ }).getByText("继承 Codex CLI 默认", { exact: true }).first().waitFor();
@@ -374,5 +426,5 @@ try {
   await restored;
   await page.getByRole("heading", { name: "运行设置" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、项目添加和移除、AI 自动判断、直接创建任务、Fast 档位设置、领取及移除保护、断线重试。");
+  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、项目添加和移除、AI 自动判断、直接创建任务、Fast 档位设置、领取及移除保护、DSH 模型保存、隔离浏览器表单及断线重试。");
 } finally { await dispose(); }

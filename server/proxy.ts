@@ -1,3 +1,4 @@
+import { serveBrowserCheck } from "./browser-proof.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -142,6 +143,7 @@ export function createConsole(options: {
         throw new RequestError(403, "请用终端显示的本机地址打开控制台。");
       }
       const url = new URL(req.url, origin);
+      if (url.pathname.startsWith("/router-browser-check/") && await serveBrowserCheck(req, res, url)) return;
       if (!url.pathname.startsWith("/api/")) {
         if ((req.method === "GET" || req.method === "HEAD") && options.frontend) return await options.frontend(req, res);
         throw new RequestError(404, "没有这个地址。");
@@ -213,7 +215,7 @@ export function createConsole(options: {
         else {
           const body = await readObject(req);
           if (planWrite) {
-            if (url.pathname.endsWith("/probe")) result = await options.router.planProbe(body, signal);
+            if (url.pathname.endsWith("/probe")) result = await options.router.planProbe(body, signal, origin);
             else if (url.pathname.endsWith("/verify")) result = await options.router.verifyPlan(body, signal);
             else result = await options.router.changePlan(body, signal);
           } else result = registerAgent ? await options.router.registerAgent(body, signal) : profileSave ? await options.router.changeProfile(body, signal) : projectChange

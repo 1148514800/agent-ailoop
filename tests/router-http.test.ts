@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -731,6 +731,34 @@ test("named plans bind each Run to the selected agent revision and reject unveri
     { type: "thread.started", thread_id: session },
     { type: "item.completed", item: { type: "mcp_tool_call", server: "playwright", tool: "browser_snapshot", status: "completed", result: { content: [] } } },
   ].map((record) => JSON.stringify(record)).join("\n"));
+  assert.equal((await verify()).status, 409, "a snapshot alone does not prove browser interaction");
+  const prompt = probeJob.context.events[0]!.detail!;
+  const url = prompt.match(/http:\/\/[^ ]+\/router-browser-check\/[a-f0-9]{32}/)?.[0];
+  const token = prompt.match(/输入 ([a-f0-9]{32})/)?.[1];
+  assert.ok(url && token);
+  const form = await new Promise<string>((resolve, reject) => {
+    const req = httpRequest(url, { method: "POST", headers: { origin: new URL(url).origin,
+      "sec-fetch-mode": "navigate", "content-type": "application/x-www-form-urlencoded" } }, async (response) => {
+      try {
+        assert.equal(response.statusCode, 200);
+        let raw = "";
+        for await (const chunk of response) raw += chunk;
+        resolve(raw);
+      } catch (error) { reject(error); }
+    });
+    req.on("error", reject).end(new URLSearchParams({ proof: token }).toString());
+  });
+  const resultToken = form.match(/<p>([a-f0-9]{32})<\/p>/)?.[1];
+  assert.ok(resultToken);
+  const call = (tool: string, args: unknown, output = "成功") => ({
+    type: "item.completed", item: { type: "mcp_tool_call", server: "playwright", tool,
+      arguments: args, status: "completed", result: { content: [{ text: output }] } },
+  });
+  await writeFile(join(output, "stdout-1.log"), [
+    { type: "thread.started", thread_id: session },
+    call("browser_navigate", { url }), call("browser_type", { text: token }),
+    call("browser_click", {}), call("browser_snapshot", {}, resultToken),
+  ].map((record) => JSON.stringify(record)).join("\n"));
   assert.deepEqual(await verify(), { status: 200, result: { capabilities: ["browser_use"] } });
   const verifiedRun = await send("message", { ...request, requestId: randomUUID(), message: "方案测试 操作浏览器" });
   assert.equal(verifiedRun.result.planName, "浏览器验证");
@@ -738,4 +766,116 @@ test("named plans bind each Run to the selected agent revision and reject unveri
   assert.equal(browserJob.run, verifiedRun.result.run.id);
   await worker.result(browserJob.run, browserJob.token, { outcome: "done" });
 
+});
+
+test("reused DSH providers isolate selected models, gateway credentials and queued versions", async () => {
+  const oldHome = process.env.DSH_HOME;
+  const dshHome = join(home, "fixture-dsh");
+  const folder = join(dshHome, "profiles", "desktop");
+  process.env.DSH_HOME = dshHome;
+  await mkdir(folder, { recursive: true });
+  const secrets = ["fixture-native-key-a", "fixture-native-key-b"];
+  const patch = JSON.stringify([{ id: "llm-pi-ai", config: { providers: {
+    alfa: { api: "openai-completions", baseURL: "https://alfa.invalid", apiKeyEnv: "FIXTURE_A", models: [
+      { id: "model-one", reasoningEfforts: { low: "minimal", high: "high" } }, { id: "model-two" },
+    ] },
+    beta: { api: "openai-completions", baseURL: "https://beta.invalid", apiKeyEnv: "FIXTURE_B",
+      models: [{ id: "model-two", reasoningEfforts: { high: "max" } }] },
+  } } }]);
+  const patchFile = join(folder, "cordis.patch.yml");
+  await writeFile(patchFile, patch);
+  await writeFile(join(dshHome, ".credentials.yaml"), JSON.stringify({ version: 1, refs: { FIXTURE_A: secrets[0], FIXTURE_B: secrets[1] } }), { mode: 0o600 });
+  const headers = { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf };
+  const send = async (path: string, body?: object) => {
+    const response = await fetch(base + "/api/router/" + path, { headers, ...(body && { method: "POST", body: JSON.stringify(body) }) });
+    const result = await response.text();
+    for (const secret of secrets) assert.ok(!result.includes(secret));
+    return { status: response.status, result: JSON.parse(result) };
+  };
+  try {
+    const { result } = await send("plans");
+    assert.deepEqual(result.dshCatalog[0].models, [{ id: "model-one", efforts: ["low", "high"] }, { id: "model-two", efforts: [] }]);
+    assert.ok(!JSON.stringify(result.dshCatalog).includes("alfa.invalid"));
+    const make = { id: "", name: "本机第一模型", agentId: "fixture-dsh", model: "model-one", effort: "low",
+      tasks: ["research"], complexity: "any", projects: ["default"], enabled: true, priority: 100,
+      provider: { existing: { profile: "desktop", id: "alfa" } } };
+    assert.equal((await send("plans", { ...make, effort: "xhigh" })).status, 400);
+    const old = await send("plans", make);
+    assert.equal(old.status, 200, old.result.error);
+    const next = await send("plans", { ...make, name: "本机第二模型", model: "model-two", effort: "",
+      provider: { existing: { profile: "desktop", id: "alfa" } } });
+    assert.equal(next.status, 200, next.result.error);
+    const run = (id: string) => send("task", { requestId: randomUUID(), projectId: "default", executionProfile: "plan:" + id,
+      needsPlan: true, message: "读取测试数据", requirements: { type: "research", tools: [], complexity: "complex" } });
+    const runs = [await run(old.result.id), await run(next.result.id)];
+    const switched = await send("plans", { ...make, id: old.result.id, model: "model-two", effort: "high",
+      provider: { existing: { profile: "desktop", id: "beta" } } });
+    assert.equal(switched.status, 200, switched.result.error);
+    runs.push(await run(old.result.id));
+    const expected = [["model-one", "low", "alfa", "minimal"], ["model-two", undefined, "alfa", undefined], ["model-two", "high", "beta", "max"]];
+    const worker = hubClient(hubUrl, JSON.parse(await readFile(join(home, "config.json"), "utf8")).worker.key);
+    const refs = new Set();
+    for (const [i, response] of runs.entries()) {
+      assert.equal(response.status, 200, response.result.error);
+      const job = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true, providers: true })).job;
+      const [model, effort, gateway, mapped] = expected[i]!;
+      assert.equal(job.run, response.result.run.id);
+      assert.deepEqual([job.agent.id, job.agent.model, job.agent.effort, job.rule.cwd], ["fixture-dsh", model, effort, home]);
+      assert.ok(job.rule.prompt.includes(".plan") && job.rule.prompt.includes("context.json"));
+      assert.equal(job.context.events[0].type.endsWith(".plan"), true);
+      assert.ok(job.agent.providerRef);
+      refs.add(job.agent.providerRef);
+      const directory = join(home, "dsh-routes", job.agent.providerRef);
+      const imported = JSON.parse(await readFile(join(directory, "route.yml"), "utf8"))[1].config.providers["autoloop-gateway"];
+      assert.equal(imported.baseURL, "https://" + gateway + ".invalid");
+      assert.equal(imported.models[0].reasoningEfforts?.[effort!], mapped);
+      assert.ok((await readFile(join(directory, ".credentials.yaml"), "utf8")).includes(secrets[gateway === "alfa" ? 0 : 1]!));
+      await worker.result(job.run, job.token, { outcome: "done" });
+    }
+    assert.equal(refs.size, 3);
+    assert.equal(await readFile(patchFile, "utf8"), patch);
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = oldHome;
+  }
+});
+
+test("a stale owner and Hub confirmation timeout leave a recoverable, runnable plan version", async () => {
+  const { planManagement, readPlans } = await import("../server/execution-plans.ts");
+  const { RouterError } = await import("../server/router.ts");
+  const disk = process.env.AGENT_AUTOLOOP_RULES!;
+  const lock = disk + ".router-projects.lock";
+  await mkdir(lock);
+  await writeFile(join(lock, "pid-2147483647"), "");
+  const original = await readFile(disk, "utf8");
+  const timeout = new Error("test after rules publish");
+  const body = { id: "", name: "恢复测试", agentId: "fixture-codex", model: "recover-test", effort: "low",
+    tasks: ["general"], complexity: "any", projects: ["default"], enabled: true, priority: 50 };
+  const dependencies = { async hub() { const hub = await loadHub(); assert.ok(hub.source); return { ...hub, source: hub.source }; },
+    async guard() { return { ruleExecutionOverrides: true, ruleProviderOverrides: true, runs: [] }; },
+    async validate() { return "fixture"; }, async secrets() { return []; } };
+  const blocked = planManagement({ ...dependencies, async guard() {
+    if (++guardCalls === 2) throw new RouterError(409, "test before rules publish");
+    return dependencies.guard();
+  }, async confirm() { assert.fail("must not confirm unpublished rules"); } });
+  let guardCalls = 0;
+  await assert.rejects(blocked.changePlan(body, new AbortController().signal), /test before rules publish/);
+  assert.equal(await readFile(disk, "utf8"), original);
+  assert.equal((await readPlans()).entries.some(({ plan }) => plan.name === body.name), false);
+  const manager = planManagement({ ...dependencies, async confirm() { throw timeout; } });
+  await assert.rejects(manager.changePlan(body, new AbortController().signal), timeout);
+  assert.notEqual(await readFile(disk, "utf8"), original);
+  const data = JSON.parse(await readFile(disk, "utf8"));
+  data.sources.recovery = { name: "验证无关的规则修改" };
+  await writeFile(disk, JSON.stringify(data));
+  assert.deepEqual(hubRuntime.reloadRules(), {});
+  const recovered = (await readPlans()).entries.find(({ plan }) => plan.name === body.name);
+  assert.ok(recovered);
+  const response = await fetch(base + "/api/router/task", { method: "POST",
+    headers: { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf },
+    body: JSON.stringify({ requestId: randomUUID(), projectId: "default", message: "恢复后直接运行", needsPlan: false,
+      executionProfile: "plan:" + recovered.plan.id, requirements: { type: "general", tools: [], complexity: "simple" } }) });
+  const result = await response.json();
+  assert.equal(response.status, 200, result.error);
+  assert.equal(result.execution.model, body.model);
 });

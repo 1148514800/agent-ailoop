@@ -137,17 +137,21 @@ Fast 和 Strong 是项目的执行档位。Agent 自身配置的模型、思考�
 
 ### 本机 Agent 与执行方案
 
-在「Agent → 扫描本机 Agent」可查看 Codex、DeepSeek Harness 和 Claude Code 的已安装位置、版本、适配器检查结果与成功轮次记录。扫描只检查支持的 CLI 的版本和帮助。注册时选择本机 Worker、名称与权限。网页通过现有规则热加载登记 Agent。已有 Agent 和版本化规则继续供既有轮次使用。
+在「Agent → 扫描本机 Agent」可查看 Codex、DeepSeek Harness 和 Claude Code 的已安装位置、版本、适配器检查结果与成功轮次记录。扫描读取本机进程和登录 shell 的 PATH，也检查 macOS 应用内置入口及 Windows 的常见启动文件。仅对支持的 CLI 检查版本和帮助，结果限本机 Worker。注册时选择本机 Worker、名称与权限。网页通过现有规则热加载登记 Agent。已有 Agent 和版本化规则继续供既有轮次使用。
 
-在「运行总览 → AI Router → 执行方案」可创建、编辑和禁用方案。每个方案绑定一个 Agent，并指定授权项目、适用任务类型、复杂度偏好和优先级。Codex 和 Claude Code 可配置模型与思考强度。DSH 方案可使用 DSH 内部默认配置，或在「DSH 供应商」中选择「自定义供应商」。Fast / Strong 仍可直接选择。
+在「运行总览 → AI Router → 执行方案」可创建、编辑和禁用方案。每个方案绑定一个 Agent，并指定授权项目、适用任务类型、复杂度偏好和优先级。Codex 和 Claude Code 可配置模型与思考强度。DSH 方案可使用 DSH 内部默认配置、复用已配置的本机供应商，或使用独立自定义供应商。Fast / Strong 仍可直接选择。
 
-自定义 DSH 供应商需绑定本机 Worker。选择网关的 API 协议、填写 Base URL（例如 `https://gateway.example/v1`）和 API Key，再选现有模型 ID 或手动添加。可选思考强度和网关要求的 API 强度值。DeepSeek 兼容网关可以选择 DeepSeek thinking。首次使用此功能前需要运行新版 Hub 和 Worker。
+选择「复用 DSH 已配置的供应商」，可从本机 `desktop` 或 `headless` profile 的自定义供应商中选择模型。推理级别来自该模型在 DSH 中申明的配置，也可以留空交给供应商决定。控制台服务端保存该轮次版本所需的网关、模型和凭据副本，DSH 全局设置无需修改。同一个 DSH Agent 可以绑定多个方案，每个方案独立选择供应商、模型和推理级别。依赖额外认证、请求头或特殊网关参数的配置请单独核对兼容性。 [DSH 供应商文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.zh.md)
+
+使用第三方 DSH 供应商的方案需绑定本机 Worker。选择网关的 API 协议、填写 Base URL（例如 `https://gateway.example/v1`）和 API Key，再选现有模型 ID 或手动添加。可选思考强度和网关要求的 API 强度值。DeepSeek 兼容网关可以选择 DeepSeek thinking。首次使用此功能前需要运行新版 Hub 和 Worker。
 
 供应商密钥写入本机中台数据目录下对应版本的私有 DSH 凭据文件。网页只返回公开配置。修改同一地址、同一协议的方案时，留空 API Key 可复用原密钥。更换地址或协议时需要重新输入。队列和重试继续引用原版本，所以旧凭据信息也随原版本保留。自定义方案的 DSH 会话与默认 DSH 配置隔离。
 
+如果控制台在写入规则后退出或等待 Hub 热加载超时，重新打开方案即可从本机规则和保存记录恢复。中台生效版本仍须与本机规则一致，才能派发。Web 管理的项目与重新保存的档位和方案使用一致的任务提示。通过 `context.json` 读取本轮资料，`.direct` 执行后验证，`.plan` 先阅读项目并规划，再执行验证。重新保存可为旧方案生成新版规则，历史轮次继续引用原版。
+
 自动路由先检查任务需要的工具与类型，再按复杂度偏好和优先级选方案。手动选择命名方案时可直接提交并声明任务要求，也可让 AI 判断。需要电脑操作的任务必须有符合要求的已验证方案。方案变更建立新规则版本，已有轮次和重试仍引用原规则。
 
-工具验证在「执行方案」内针对一个授权项目发起。当前核验器识别本机 Codex Worker 成功调用的 `playwright/browser_snapshot` 和 `desktop/screenshot`。这两个 MCP 服务由操作者配置。选定能力后运行验证，待轮次完成，输入轮次编号并核验对应能力。控制台核对该方案当前版本的完成记录及 Worker 工具日志，只给通过验证的项目启用相应能力。
+浏览器能力在「执行方案」内按授权项目核验。后台 Codex Worker 需要可用的 `playwright` MCP。选择项目后运行验证，等待轮次完成，再核验该轮次。Worker 必须在隔离的本机页面输入文本、点击提交并读取结果。控制台核对交互结果、Worker 工具记录、轮次会话及当前方案版本。升级后的浏览器方案需要重新核验。桌面交互保持未验证，要求桌面操作的任务会被拒绝。
 
 ### API 与数据流
 
@@ -192,7 +196,7 @@ npm run test:browser -- --screenshots
 
 上游完整测试需要独立检出上游提交，因为其中一项测试会读取中台自己的 Git 提交。仓库根目录的测试验证中台与控制台集成。
 
-浏览器测试默认从本仓库的 `agent-autoloop/` 源码启动临时中台。可用 `AUTOLOOP_SOURCE` 指定源码路径，也可用 `AUTOLOOP_BROWSER_CHANNEL=chrome` 选择已安装的 Chrome。测试使用临时目录、随机端口和测试 Worker 请求，结束后退出进程并清理目录。截图只包含临时中台中的虚构资料。
+浏览器测试默认从本仓库的 `agent-autoloop/` 源码启动临时中台。可用 `AUTOLOOP_SOURCE` 指定源码路径，也可用 `AUTOLOOP_BROWSER_CHANNEL=chrome` 选择已安装的 Chrome，或用 `AUTOLOOP_TEST_SCREENSHOTS` 指定截图输出目录。测试使用临时目录、随机端口和测试 Worker 请求，结束后退出进程并清理目录。截图只包含临时中台中的虚构资料。
 
 已在 macOS 上使用 Node.js 24.22.3 和 Chrome 验证。类型检查、生产构建、控制台自动化测试和真实 HTTP 浏览器验收均通过。浏览器验收覆盖零号审批选项、手机文字回复、通知结案、规则控制、轮次停止确认、历史分页及筛选、断线期间事件续读和中台离线状态。开发模式通过启动和会话边界检查。测试 Worker 用协议上报领取与停止确认。
 

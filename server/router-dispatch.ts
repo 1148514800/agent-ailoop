@@ -1,3 +1,4 @@
+import { browserProbe } from "./browser-proof.ts";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -5,12 +6,13 @@ import { basename, isAbsolute, join } from "node:path";
 import { eventRule, typeMatches } from "../agent-autoloop/kernel/rules.ts";
 import { rulesRevision } from "../agent-autoloop/protocol/rules.ts";
 import { MODEL_PROFILES, ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
-import type { ExecuteDecision, ExecutionConfig, ExecutionProfile, RouterMode, RouterProject, RouterReply, RouterResult, TaskRequirements, ToolCapability } from "../shared/router.ts";
+import type { ExecuteDecision, ExecutionConfig, ExecutionProfile, RouterMode, RouterProject, RouterReply, RouterResult, TaskRequirements } from "../shared/router.ts";
 import type { RunState, State } from "../shared/types.ts";
 import type { Hub } from "./hub.ts";
 import { routerRecords } from "./router-records.ts";
 import { localAgent, scanAgents } from "./local-agents.ts";
-import { choosePlan, isPlanChoice, matchingPlans, planManagement, probeMessage, readPlans } from "./execution-plans.ts";
+import { dshCatalog } from "./dsh-catalog.ts";
+import { choosePlan, isPlanChoice, matchingPlans, planManagement, readPlans } from "./execution-plans.ts";
 import { classify, parseRequirements, RouterError } from "./router.ts";
 import type { routerConfig } from "./router.ts";
 
@@ -194,7 +196,7 @@ export function createRouter(options: {
     })) };
   }
 
-  async function submit(body: Record<string, unknown>, signal: AbortSignal, mode: RouterMode = "auto", probe?: ToolCapability) {
+  async function submit(body: Record<string, unknown>, signal: AbortSignal, mode: RouterMode = "auto", probe?: { summary: string }) {
     const { requestId, message, needsPlan } = body;
     const choice = body.executionProfile === undefined ? "default" : body.executionProfile;
     const projectId = body.projectId === undefined && mode === "auto" ? "default" : body.projectId;
@@ -342,7 +344,7 @@ export function createRouter(options: {
           // If a response was lost, the hub checks this same source and external ID before inserting anything.
           const accepted = await hubRequest<{ event: number }>(hub, "/v1/events", source.key, signal, {
             source: source.name, revision,
-            body: { id: "router-" + id, type, subject: "task-" + id, summary: probe ? "方案能力验证 " + probe : selectedPlan ? selectedPlan.plan.name + " · " + requirements?.type : "AI Router 提交的任务", detail: message },
+            body: { id: "router-" + id, type, subject: "task-" + id, summary: probe ? probe.summary : selectedPlan ? selectedPlan.plan.name + " · " + requirements?.type : "AI Router 提交的任务", detail: message },
           });
           if (!Number.isSafeInteger(accepted?.event) || accepted.event < 1) {
             throw new RouterError(502, "中台未返回有效事件编号。请保留原请求并重试。");
@@ -397,14 +399,15 @@ export function createRouter(options: {
     const safe = (fields: string[]) => !fields.some((field) => secrets.some((key) => field.includes(key)));
     const agents = Object.entries(rules.agents).flatMap(([id, { use, name, access }]) =>
       ["codex", "dsh", "claude"].includes(use) && safe([id, name]) ? [{ id, use, name, access }] : []);
-    return { agents, plans: saved.entries.map(({ plan }) => plan)
+    return { agents, dshCatalog: await dshCatalog(), plans: saved.entries.map(({ plan }) => plan)
       .filter((plan) => safe([plan.name, plan.agentId, plan.model, ...plan.projects])) };
   }
 
-  async function planProbe(body: Record<string, unknown>, signal: AbortSignal) {
+  async function planProbe(body: Record<string, unknown>, signal: AbortSignal, origin: string) {
     const { projectId, id, tool } = body;
     if (Object.keys(body).length !== 3 || !validProject(projectId) || typeof id !== "string" ||
         (tool !== "browser_use" && tool !== "desktop_use")) throw new RouterError(400, "请选择方案、项目和验证能力。");
+    if (tool === "desktop_use") throw new RouterError(409, "桌面交互暂未提供隔离验证。");
     const executionProfile = "plan:" + id;
     if (!isPlanChoice(executionProfile)) throw new RouterError(400, "方案编号无效。");
     const hub = await loadSource();
@@ -415,8 +418,10 @@ export function createRouter(options: {
         !(await scanAgents(rules, hub.localWorker, signal, new Set())).agents.some((scan) => scan.kind === "codex" && scan.program === agent.program)) {
       throw new RouterError(409, "验证需要本机 Codex 方案及只读或工作区权限。");
     }
-    return submit({ requestId: randomUUID(), message: probeMessage(tool), projectId, executionProfile, needsPlan: false,
-      requirements: { type: "operation", tools: [], complexity: "simple" } }, signal, "direct", tool);
+    const requestId = randomUUID();
+    const probe = browserProbe(origin, requestId);
+    return submit({ requestId, message: probe.message, projectId, executionProfile, needsPlan: false,
+      requirements: { type: "operation", tools: [], complexity: "simple" } }, signal, "direct", probe);
   }
 
   async function agentScan(signal: AbortSignal) {

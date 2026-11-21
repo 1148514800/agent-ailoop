@@ -19,6 +19,7 @@ export async function fixture(home) {
     agents: {
       codex: { name: "Codex", use: "codex", worker: "studio-mac" },
       "router-codex": { name: "项目 Codex", use: "codex", worker: "router-worker" },
+      dsh: { name: "测试 DeepSeek Harness", use: "dsh", worker: "studio-mac" },
       claude: { name: "Claude Code", use: "claude", worker: "studio-mac" },
       router: { name: "Router 测试 Agent", use: "command", worker: "router-worker", command: ["node", "--version"] },
       runner: { name: "巡检脚本", use: "command", worker: "ops-runner", command: ["node", "-e", "process.exit(0)"] },
@@ -63,7 +64,7 @@ export async function fixture(home) {
   const disconnect = () => { for (const stream of streams) stream.destroy(); };
   await once(hub, "listening");
   const url = "http://127.0.0.1:" + hub.address().port;
-  await writeFile(join(home, "config.json"), JSON.stringify({ url, owner, worker: { key: worker }, source: { name: "local", key: local } }), { mode: 0o600 });
+  await writeFile(join(home, "config.json"), JSON.stringify({ url, owner, worker: { name: "studio-mac", key: worker }, source: { name: "local", key: local } }), { mode: 0o600 });
 
   async function call(path, method = "GET", key = owner, body) {
     const res = await fetch(url + path, {

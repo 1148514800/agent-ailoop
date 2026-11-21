@@ -41,21 +41,18 @@ export async function prepareDshProvider(
   const details = { api: protocol, baseURL: baseAddress(baseURL.trim()), thinkingFormat, effortValue } satisfies Omit<DshProvider, "ref">;
   const prior = previous?.provider;
   const sameGateway = prior && prior.api === details.api && prior.baseURL === details.baseURL;
-  let secret = key;
-  if (!secret) {
-    if (!sameGateway || !refPattern.test(prior.ref)) throw new RouterError(400, "新增或更换供应商地址或协议时，请重新填写 API Key。");
-    try {
-      const data = JSON.parse(await readFile(join(store(), prior.ref, ".credentials.yaml"), "utf8"));
-      secret = data?.refs?.[keyName];
-      if (typeof secret !== "string" || !keyPattern.test(secret)) throw new Error();
-    } catch {
-      throw new RouterError(409, "未找到这个 DSH 供应商的本机 API Key，请重新填写。");
-    }
-  }
+  const saved = sameGateway && refPattern.test(prior.ref)
+    ? await readFile(join(store(), prior.ref, ".credentials.yaml"), "utf8").then((raw) => {
+      const secret = JSON.parse(raw)?.refs?.[keyName];
+      return typeof secret === "string" && keyPattern.test(secret) ? secret : undefined;
+    }).catch(() => undefined) : undefined;
+  if (!key && !sameGateway) throw new RouterError(400, "新增或更换供应商地址或协议时，请重新填写 API Key。");
+  const secret = key || saved;
+  if (!secret) throw new RouterError(409, "未找到这个 DSH 供应商的本机 API Key，请重新填写。");
   if (secret.length >= 8 && [details.baseURL, model, effortValue].some((field) => field.includes(secret))) {
     throw new RouterError(400, "供应商地址、模型和推理强度字段不能包含 API Key。");
   }
-  if (!key && sameGateway && previous.model === model && previous.effort === effort &&
+  if (saved === secret && sameGateway && previous.model === model && previous.effort === effort &&
       prior.thinkingFormat === thinkingFormat && prior.effortValue === effortValue) {
     return { provider: prior, secret };
   }

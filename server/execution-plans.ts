@@ -1,17 +1,19 @@
-import { readFile, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { eventRule, typeMatches, type Rule, type Rules } from "../agent-autoloop/kernel/rules.ts";
 import type { Hub } from "./hub.ts";
 import { CODEX_EFFORTS, TASK_TYPES } from "../shared/router.ts";
 import type { ExecutionPlan, PlanChoice, TaskRequirements, ToolCapability } from "../shared/router.ts";
+import { rulesRevision } from "../agent-autoloop/protocol/rules.ts";
+import { verifiedBrowserInteraction } from "./browser-proof.ts";
+import { variantPrompt } from "./router-task-prompt.ts";
 import type { Run } from "../shared/types.ts";
-import { configSnapshot, dataHome, digest, metadataFile, parseRouterRules, readProjectMetadata,
+import { configSnapshot, digest, metadataFile, parseRouterRules, readProjectMetadata,
   replaceConfig, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
+import { configuredDshRoute } from "./dsh-catalog.ts";
 import { prepareDshProvider, removeUnpublishedDshProvider, writeDshProvider } from "./dsh-provider.ts";
 import { RouterError } from "./router.ts";
 
-type Entry = { plan: ExecutionPlan; variants: Record<string, string>; agentVersion: string; verified?: Record<string, ToolCapability[]> };
+type Entry = { plan: ExecutionPlan; variants: Record<string, string>; agentVersion: string; proofVersion?: 2; verified?: Record<string, ToolCapability[]> };
 const encode = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
 const planFile = (file: string) => file + ".router-plans.json";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -22,9 +24,23 @@ export const isPlanRule = (name: string, project: string) => name.startsWith("ai
 export async function readPlans() {
   const snapshot = await configSnapshot(planFile(rulesFile()));
   try {
-    const entries: Entry[] = snapshot ? JSON.parse(snapshot.raw) : [];
+    const value = snapshot ? JSON.parse(snapshot.raw) : [];
+    let entries: Entry[] = Array.isArray(value) ? value : value.active;
     if (!Array.isArray(entries)) throw new Error();
-    return { snapshot, entries };
+    if (value.pending) {
+      const current = await configSnapshot(rulesFile());
+      if (current) {
+        const rules = parseRouterRules(current.raw);
+        const additions: string[] = value.pending.additions ?? [];
+        if (rulesRevision(rules) === value.pending.revision ||
+            (additions.length > 0 && additions.every((name) => rules.rules.some((rule) => rule.name === name)))) {
+          entries = value.pending.entries;
+        }
+      }
+    }
+    if (!Array.isArray(entries)) throw new Error();
+    return { snapshot, entries: entries.map((entry) => entry.proofVersion === 2 ? entry
+      : { ...entry, verified: undefined, plan: { ...entry.plan, capabilities: [] } }) };
   } catch {
     throw new RouterError(503, "无法读取执行方案。");
   }
@@ -35,13 +51,13 @@ function overlaps(rules: Rules, candidate: Rule & { when: { source: string; type
     rule.when.source === candidate.when.source && candidate.when.types.some((type) => typeMatches(rule.when.types, type)));
 }
 
-function variant(base: Rule & { when: { source: string; types: string[] } }, plan: ExecutionPlan, rules: Rules, project: string) {
+function variant(base: Rule & { when: { source: string; types: string[] } }, plan: ExecutionPlan, rules: Rules, project: string, legacy = false) {
   const revision = digest(JSON.stringify([base, plan.id, plan.name, plan.agentId, plan.model, plan.effort,
-    rules.agents[plan.agentId], ...(plan.provider ? [plan.provider.ref] : [])])).slice(0, 24);
+    rules.agents[plan.agentId], ...(plan.provider ? [plan.provider.ref] : []), ...(!legacy ? [variantPrompt(base.prompt)] : [])])).slice(0, 24);
   return { ...base, name: "ai-plan/" + project + "/" + revision, to: plan.agentId,
     when: { source: base.when.source, types: ["router.plan." + revision + ".direct", "router.plan." + revision + ".plan"] },
     execution: { model: plan.model || null, effort: plan.effort || null, pauseWith: base.name, ...(plan.provider && { providerRef: plan.provider.ref }) },
-    prompt: [base.prompt, "读取 context.json 的事件详情。router.plan.*.plan 表示先阅读项目并制定计划再执行。"].filter(Boolean).join("\n\n"),
+    prompt: legacy ? [base.prompt, "读取 context.json 的事件详情。router.plan.*.plan 表示先阅读项目并制定计划再执行。"].filter(Boolean).join("\n\n") : variantPrompt(base.prompt),
   };
 }
 
@@ -50,7 +66,8 @@ export function planRule(entry: Entry, rules: Rules, project: string) {
   const base = rules.rules.find((item) => item.name === ruleName(project));
   const agent = rules.agents[plan.agentId];
   if (!base || !eventRule(base) || !agent || digest(JSON.stringify(agent)) !== entry.agentVersion) return undefined;
-  const expected = variant(base, plan, rules, project);
+  const current = variant(base, plan, rules, project);
+  const expected = entry.variants[project] === current.name ? current : variant(base, plan, rules, project, true);
   const registered = rules.rules.find((rule) => rule.name === entry.variants[project]);
   if (JSON.stringify(expected) !== JSON.stringify(registered) || overlaps(rules, expected)) return undefined;
   return expected;
@@ -82,43 +99,6 @@ export function choosePlan(entries: ReturnType<typeof matchingPlans>, requiremen
   }
   if (requirements.tools.length) throw new RouterError(409, "没有适用且已验证所需工具能力的方案。请先配置并验证执行方案。");
 }
-
-const toolsByName: Record<ToolCapability, { server: string; tool: string }> = {
-  browser_use: { server: "playwright", tool: "browser_snapshot" },
-  desktop_use: { server: "desktop", tool: "screenshot" },
-};
-
-async function workerEvidence(run: Run, capability: ToolCapability) {
-  const folder = join(dataHome(), "worker", "runs", run.id + "-" + (run.attempts + 1));
-  const names = await readdir(folder).catch(() => []);
-  const expected = toolsByName[capability];
-  for (const name of names.filter((file) => /^stdout-[1-9]\d*\.log$/.test(file))) {
-    const path = join(folder, name);
-    const info = await stat(path).catch(() => null);
-    if (!info?.isFile() || info.size > 16 * 1024 * 1024) continue;
-    const log = await readFile(path, "utf8").catch(() => "");
-    let session = false;
-    let successful = false;
-    for (const line of log.split("\n")) {
-      if (!line.startsWith("{")) continue;
-      try {
-        const event = JSON.parse(line);
-        if (event?.type === "thread.started" && event.thread_id === run.session) session = true;
-        const item = event?.item;
-        if (event?.type === "item.completed" && item?.type === "mcp_tool_call" && item.status === "completed" &&
-            item.server === expected.server && item.tool === expected.tool && item.result && !item.error) successful = true;
-      } catch {}
-    }
-    if (session && successful) return true;
-  }
-  return false;
-}
-
-export const probeMessage = (tool: ToolCapability) => {
-  const { server, tool: name } = toolsByName[tool];
-  return "只读能力验证。通过 MCP 调用 " + server + "/" + name +
-    "，只执行这一项。不要导航、点击、输入、修改文件或对外发送信息。完成后只报告成功或失败。";
-};
 
 export function planManagement(deps: {
   hub(): Promise<Hub & { source: NonNullable<Hub["source"]> }>;
@@ -169,12 +149,14 @@ export function planManagement(deps: {
         if (!active.ruleProviderOverrides) throw new RouterError(503, "请升级并重启本机 Hub 和 Worker 后再配置 DSH 供应商。");
         if (agent.worker !== hub.localWorker) throw new RouterError(409, "DSH 自定义供应商仅可绑定本机 Worker。");
         const prior = existing?.plan;
-        route = await prepareDshProvider(provider, model, effort, prior?.provider && prior.agentId === agentId
+        const imported = provider && typeof provider === "object" && Object.keys(provider).length === 1 && "existing" in provider
+          ? await configuredDshRoute(provider.existing, model, effort) : undefined;
+        route = await prepareDshProvider(imported?.settings ?? provider, model, effort, prior?.provider && prior.agentId === agentId
           ? { provider: prior.provider, model: prior.model, effort: prior.effort } : undefined);
         if (route.secret.length >= 8 && [plan.name, ...plan.projects].some((field) => field.includes(route!.secret))) {
           throw new RouterError(400, "方案名称和项目不能包含 API Key。");
         }
-        plan.provider = route.provider;
+        plan.provider = { ...route.provider, ...(imported && { source: imported.source }) };
       }
       const metadata = readProjectMetadata(await configSnapshot(metadataFile(file)));
       const agentVersion = digest(JSON.stringify(agent));
@@ -201,7 +183,26 @@ export function planManagement(deps: {
       plan.capabilities = [...new Set(Object.values(verified).flat())];
       const raw = encode(rawRules);
       const prepared = parseRouterRules(raw);
+      const next = [...entries.filter((entry) => entry !== existing), { plan, variants, agentVersion, verified, proofVersion: 2 as const }];
       if (route?.create) await writeDshProvider(route.provider, route.secret, model, effort);
+      const sidecar = planFile(file);
+      const revision = rulesRevision(prepared);
+      const additions = prepared.rules.filter((rule) => !rules.rules.some(({ name }) => name === rule.name)).map(({ name }) => name);
+      let staged;
+      try {
+        if (revision === rulesRevision(rules)) {
+          await replaceConfig(sidecar, snapshot, encode(next), async () => {
+            await deps.guard(hub, rules, signal);
+            if ((await configSnapshot(file))?.raw !== before.raw) throw new RouterError(409, "规则在保存期间发生变更，请重试。");
+          });
+          return { id: plan.id };
+        }
+        await replaceConfig(sidecar, snapshot, encode({ active: entries, pending: { revision, additions, entries: next } }));
+        staged = await configSnapshot(sidecar);
+      } catch (error) {
+        if (route?.create && !staged) await removeUnpublishedDshProvider(route.provider);
+        throw error;
+      }
       try {
         await replaceConfig(file, before, raw, async () => { await deps.guard(hub, rules, signal); });
       } catch (error) {
@@ -209,7 +210,7 @@ export function planManagement(deps: {
         throw error;
       }
       await deps.confirm(hub, prepared, file, raw);
-      await replaceConfig(planFile(file), snapshot, encode([...entries.filter((entry) => entry !== existing), { plan, variants, agentVersion, verified }]));
+      await replaceConfig(sidecar, staged, encode(next));
       return { id: plan.id };
     });
   }
@@ -231,9 +232,9 @@ export function planManagement(deps: {
       const run = active.runs.find((item) => item.id === runId && item.state === "done" && item.agent === entry?.plan.agentId);
       const project = entry?.plan.projects.find((id) => planRule(entry, rules, id)?.name === run?.rule);
       if (!entry || !agent || agent.use !== "codex" || agent.worker !== hub.localWorker ||
-          !run?.session || !project || !run.events.some((event) => event.summary === "方案能力验证 " + tool) ||
-          !await workerEvidence(run, tool)) throw new RouterError(409, "未找到该方案版本在本机 Worker 上成功调用指定工具的证据。");
+          !run?.session || !project || tool !== "browser_use" || !await verifiedBrowserInteraction(run)) throw new RouterError(409, "未找到该方案版本在本机 Worker 上成功调用指定工具的证据。");
       const capabilities = [...new Set<ToolCapability>([...(entry.verified?.[project] ?? []), tool])];
+      entry.proofVersion = 2;
       entry.verified = { ...entry.verified, [project]: capabilities };
       entry.plan.capabilities = [...new Set(Object.values(entry.verified).flat())];
       await replaceConfig(planFile(file), snapshot, encode(entries));

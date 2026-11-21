@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -77,20 +77,55 @@ export async function replaceConfig(file: string, before: ConfigSnapshot, raw: s
   }
 }
 
-export async function withProjectLock<T>(file: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
-  const lock = file + ".router-projects.lock";
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    if (signal.aborted) throw new RouterError(408, "项目操作已取消。");
-    try { await mkdir(lock, { mode: 0o700 }); break; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new RouterError(503, "无法建立项目配置锁，请检查本机文件权限。");
-      if (Date.now() >= deadline) throw new RouterError(409, "另一个项目操作正在进行，请稍后重试。");
-      await sleep(75);
+async function clearStaleLock(lock: string) {
+  const name = (await readdir(lock).catch(() => [])).find((name) => /^pid-[1-9]\d*$/.test(name));
+  const pid = Number(name?.slice(4));
+  const owner = name && join(lock, name);
+  if (!owner || !Number.isSafeInteger(pid) || pid < 1) {
+    const info = await lstat(lock).catch(() => null);
+    if (info?.isDirectory() && Date.now() - info.mtimeMs > 10_000) await rmdir(lock).catch(() => {});
+    return;
+  }
+  try { process.kill(pid, 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH" && await unlink(owner).then(() => true, () => false)) {
+      await rmdir(lock).catch(() => {});
     }
   }
+}
+
+export async function withProjectLock<T>(file: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+  const lock = file + ".router-projects.lock";
+  const temporary = lock + "." + randomUUID() + ".tmp";
+  const owner = join(temporary, "pid-" + process.pid);
+  const deadline = Date.now() + 10_000;
+  try {
+    await mkdir(temporary, { mode: 0o700 });
+    await writeFile(owner, "", { flag: "wx", mode: 0o600 });
+    for (;;) {
+      if (signal.aborted) throw new RouterError(408, "项目操作已取消。");
+      try { await rename(temporary, lock); break; }
+      catch (error) {
+        const exists = await lstat(lock).catch(() => null);
+        if (!exists?.isDirectory() && !["EEXIST", "ENOTEMPTY", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        await clearStaleLock(lock);
+        if (Date.now() >= deadline) throw new RouterError(409, "另一个项目操作正在进行，请稍后重试。");
+        await sleep(75);
+      }
+    }
+  } catch (error) {
+    if (error instanceof RouterError) throw error;
+    throw new RouterError(503, "无法建立项目配置锁，请检查本机文件权限。");
+  } finally {
+    await unlink(owner).catch(() => {});
+    await rmdir(temporary).catch(() => {});
+  }
   try { return await work(); }
-  finally { await rmdir(lock); }
+  finally {
+    await rename(lock, temporary);
+    await unlink(owner);
+    await rmdir(temporary);
+  }
 }
 
 type ProjectEntry = { name: string; fingerprint: string; removed?: true };

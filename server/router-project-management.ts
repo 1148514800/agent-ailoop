@@ -7,6 +7,7 @@ import type { State } from "../shared/types.ts";
 import type { Hub } from "./hub.ts";
 import { configSnapshot, dataHome, digest, eventPrefix, loadRules, metadataFile, parseRouterRules, PROJECT_PREFIX,
   readProjectMetadata, replaceConfig, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
+import { routerTaskPrompt } from "./router-task-prompt.ts";
 import { RouterError } from "./router.ts";
 import { isPlanRule } from "./execution-plans.ts";
 import { isProjectProfile } from "./router-profiles.ts";
@@ -14,7 +15,7 @@ import { isProjectProfile } from "./router-profiles.ts";
 type SourceHub = Hub & { source: NonNullable<Hub["source"]> };
 type Rules = ReturnType<typeof parseRouterRules>;
 type Active = State & { rulesRevision: string };
-const prompt = "读取本轮 context.json 中的事件详情，将 detail 作为开发任务。direct 类型直接处理并验证；plan 类型先阅读项目、制定简短计划，再执行与验证。只操作本规则授权的工作目录，遵守现有权限与审批机制。";
+const prompt = routerTaskPrompt;
 const nameKey = (name: string) => name.normalize("NFKC").toLowerCase();
 const enc = (value: object) => JSON.stringify(value, null, 2) + "\n";
 

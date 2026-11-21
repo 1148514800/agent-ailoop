@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { CODEX_EFFORTS, DSH_APIS, DSH_EFFORTS, TASK_TYPES, TOOL_CAPABILITIES } from "../shared/router.ts";
-import type { ExecutionPlan, RouterProject, RouterResult, TaskRequirements, ToolCapability } from "../shared/router.ts";
+import type { DshCatalogEntry, ExecutionPlan, RouterProject, RouterResult, TaskRequirements, ToolCapability } from "../shared/router.ts";
 import { api, messageOf } from "./data.ts";
 import type { Act } from "./runs.tsx";
 import { ModelPicker } from "./router-models.tsx";
@@ -10,7 +10,7 @@ import { Button, ErrorLine, Notice } from "./ui.tsx";
 export const taskLabels = { coding: "编程", research: "研究", operation: "操作", general: "通用" };
 const toolLabels = { browser_use: "浏览器操作", desktop_use: "桌面操作" };
 const complexityLabels = { simple: "简单", complex: "复杂", any: "不限" };
-type PlanData = { agents: { id: string; use: string; access: string; name: string }[]; plans: ExecutionPlan[] };
+type PlanData = { agents: { id: string; use: string; access: string; name: string }[]; plans: ExecutionPlan[]; dshCatalog: DshCatalogEntry[] };
 
 const apiLabels = {
   "openai-completions": "OpenAI Chat Completions",
@@ -19,8 +19,16 @@ const apiLabels = {
   "google-generative-ai": "Gemini API",
 };
 
-function DshFields({ plan, plans, busy }: { plan?: ExecutionPlan; plans: ExecutionPlan[]; busy: boolean }) {
-  const [custom, setCustom] = useState(!!plan?.provider);
+function DshFields({ plan, plans, catalog, busy }: {
+  plan?: ExecutionPlan; plans: ExecutionPlan[]; catalog: DshCatalogEntry[]; busy: boolean;
+}) {
+  const source = plan?.provider?.source;
+  const sourceId = source ? source.profile + "/" + source.id : "";
+  const [mode, setMode] = useState(source ? "existing" : plan?.provider ? "custom" : "default");
+  const [routeId, setRouteId] = useState(sourceId || (catalog[0] ? catalog[0].profile + "/" + catalog[0].id : ""));
+  const route = catalog.find(({ profile, id }) => profile + "/" + id === routeId);
+  const [modelId, setModelId] = useState(source ? plan?.model ?? "" : "");
+  const model = route?.models.find(({ id }) => id === modelId);
   const [protocol, setProtocol] = useState(plan?.provider?.api ?? "openai-completions");
   const [baseURL, setBaseURL] = useState(plan?.provider?.baseURL ?? "");
   const [effort, setEffort] = useState(plan?.effort ?? "");
@@ -28,11 +36,36 @@ function DshFields({ plan, plans, busy }: { plan?: ExecutionPlan; plans: Executi
     item.provider?.api === protocol && item.provider.baseURL === baseURL.trim().replace(/\/+$/, "") ? [item.model] : []))];
   return <>
     <label className="field">DSH 供应商
-      <select name="dsh-provider" value={custom ? "custom" : "default"} disabled={busy} onChange={(event) => setCustom(event.target.value === "custom")}>
-        <option value="default">使用 DSH 内部默认模型</option><option value="custom">自定义供应商</option>
+      <select name="dsh-provider" value={mode} disabled={busy} onChange={(event) => { setMode(event.target.value); setEffort(""); }}>
+        <option value="default">使用 DSH 内部默认模型</option>
+        <option value="existing" disabled={!catalog.length && !source}>复用 DSH 已配置的供应商</option>
+        <option value="custom">自定义供应商</option>
       </select>
     </label>
-    {custom && <>
+    {mode === "existing" && <>
+      <label className="field">本机供应商
+        <select name="dsh-existing" value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(""); setEffort(""); }} required disabled={busy}>
+          <option value="">选择供应商</option>
+          {sourceId && !catalog.some(({ profile, id }) => profile + "/" + id === sourceId) && <option value={sourceId} disabled>原供应商配置已不可用</option>}
+          {catalog.map(({ profile, id, api }) => <option key={profile + "/" + id} value={profile + "/" + id}>
+            {id} · {profile} · {apiLabels[api]}
+          </option>)}
+        </select>
+      </label>
+      <label className="field">模型 ID
+        <select name="model" aria-label="模型 ID" value={modelId} onChange={(event) => { setModelId(event.target.value); setEffort(""); }} required disabled={busy || !route}>
+          <option value="">选择模型 ID</option>
+          {route?.models.map(({ id }) => <option key={id}>{id}</option>)}
+        </select>
+      </label>
+      <label className="field">思考强度
+        <select name="effort" value={effort} onChange={(event) => setEffort(event.target.value)} disabled={busy}>
+          <option value="">由供应商决定</option>
+          {model?.efforts.map((level) => <option key={level}>{level}</option>)}
+        </select>
+      </label>
+    </>}
+    {mode === "custom" && <>
       <label className="field">API 协议
         <select name="dsh-api" value={protocol} onChange={(event) => setProtocol(event.target.value as typeof protocol)} disabled={busy}>
           {DSH_APIS.map((api) => <option key={api} value={api}>{apiLabels[api]}</option>)}
@@ -92,7 +125,7 @@ export function PlanDialog({ projects, act, close, changed }: {
   const [notice, setNotice] = useState("");
   const plan = data?.plans.find(({ id }) => id === editing);
   const agent = data?.agents.find(({ id }) => id === agentId);
-  const [tool, setTool] = useState<ToolCapability>("browser_use");
+  const tool: ToolCapability = "browser_use";
   const [probeRun, setProbeRun] = useState("");
   const [catalog, setCatalog] = useState<string[] | null>(null);
   const reload = () => api<PlanData>("/router/plans").then(setData);
@@ -133,7 +166,9 @@ export function PlanDialog({ projects, act, close, changed }: {
         event.preventDefault();
         const fields = new FormData(event.currentTarget);
         const apiKey = event.currentTarget.elements.namedItem("dsh-key") as HTMLInputElement | null;
-        const provider = fields.get("dsh-provider") === "custom" ? {
+        const [profile, id] = String(fields.get("dsh-existing") ?? "").split("/");
+        const provider = fields.get("dsh-provider") === "existing" ? { existing: { profile, id } } :
+          fields.get("dsh-provider") === "custom" ? {
           api: fields.get("dsh-api"), baseURL: fields.get("dsh-base-url"), key: fields.get("dsh-key"),
           thinkingFormat: fields.get("dsh-thinking") ?? "default", effortValue: fields.get("dsh-effort-value") ?? "",
         } : undefined;
@@ -155,7 +190,7 @@ export function PlanDialog({ projects, act, close, changed }: {
           <option value="">选择已注册 Agent</option>
           {data.agents.map(({ id, name, access }) => <option key={id} value={id}>{name} · {access === "full" ? "完全访问" : access === "edit" ? "工作区可写" : "只读"}</option>)}
         </select></label>
-        {agent?.use === "dsh" && <DshFields key={agent.id} plan={plan?.agentId === agentId ? plan : undefined} plans={data.plans} busy={busy} />}
+        {agent?.use === "dsh" && <DshFields key={agent.id} plan={plan?.agentId === agentId ? plan : undefined} plans={data.plans} catalog={data.dshCatalog} busy={busy} />}
         {agent && agent.use !== "dsh" && <div key={agent.id}>
           <ModelPicker initial={plan?.agentId === agentId ? plan.model : ""} models={agent.use === "codex" ? catalog : []}
             defaultLabel={agent.use === "codex" ? undefined : "继承 Claude Code 默认"} disabled={busy} />
@@ -185,7 +220,7 @@ export function PlanDialog({ projects, act, close, changed }: {
       </form>
       {plan && <div className="router-form">
         <strong>已验证工具能力</strong>
-        <p>{plan.capabilities.map((tool) => toolLabels[tool]).join("、") || "暂无"}</p>
+        <p>{plan.capabilities.map((tool) => toolLabels[tool]).join("、") || "暂无"}。桌面交互目前无法核验。</p>
         {plan.enabled && data.agents.some((agent) => agent.id === plan.agentId && agent.use === "codex") && <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -197,13 +232,10 @@ export function PlanDialog({ projects, act, close, changed }: {
               setNotice("验证轮次 #" + result.run.id + " 已提交。完成后可核验工具调用。");
             });
           }}>
-          <label className="field">验证能力<select value={tool} onChange={(event) => setTool(event.target.value as ToolCapability)} disabled={busy}>
-            {TOOL_CAPABILITIES.map((capability) => <option key={capability} value={capability}>{toolLabels[capability]}</option>)}
-          </select></label>
           <label className="field">验证项目<select name="projectId" required disabled={busy}>
             {projects.filter(({ id }) => plan.projects.includes(id)).map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
           </select></label>
-          <div className="dialog-actions"><Button type="submit" disabled={busy}>运行只读验证</Button></div>
+          <div className="dialog-actions"><Button type="submit" disabled={busy}>运行浏览器交互验证</Button></div>
         </form>}
         {data.agents.some((agent) => agent.id === plan.agentId && agent.use === "codex") && <form onSubmit={(event) => {
           event.preventDefault();

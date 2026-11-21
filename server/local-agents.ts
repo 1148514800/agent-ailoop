@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { access, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type { Rules } from "../agent-autoloop/kernel/rules.ts";
 import type { LocalAgentKind } from "../shared/router.ts";
@@ -13,13 +13,21 @@ const kinds = ["codex", "dsh", "claude"] as const;
 const names = { codex: "Codex", dsh: "DeepSeek Harness", claude: "Claude Code" };
 
 async function executable(kind: LocalAgentKind) {
-  const dirs = [join(homedir(), ".local/bin"), dirname(process.execPath), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+  const dirs = (process.env.PATH ?? "").split(delimiter).map((path) => path.replace(/^"(.*)"$/, "$1")).filter(isAbsolute);
+  dirs.push(join(homedir(), ".local/bin"), dirname(process.execPath));
+  const windows = process.platform === "win32";
+  if (windows && process.env.APPDATA && isAbsolute(process.env.APPDATA)) dirs.push(join(process.env.APPDATA, "npm"));
+  if (!windows) dirs.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin");
+  let discovered: string | undefined;
+  try { discovered = (await import("../agent-autoloop/worker/agents.ts")).findProgram(kind); } catch {}
   const bundled = process.platform !== "darwin" ? [] : kind === "dsh"
     ? ["/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"]
     : kind === "codex" ? (await import("../agent-autoloop/plugins/codex/agent.ts")).IN_THE_APP
       : (await import("../agent-autoloop/plugins/claude/agent.ts")).inTheApp();
-  const basename = kind + (process.platform === "win32" ? ".exe" : "");
-  for (const file of [...dirs.map((dir) => join(dir, basename)), ...bundled]) {
+  const extensions = windows ? [".exe", ".cmd", ".ps1"] : [""];
+  const paths = [...dirs.flatMap((dir) => extensions.map((ext) => join(dir, kind + ext))), ...bundled];
+  if (discovered && isAbsolute(discovered)) paths.unshift(discovered);
+  for (const file of new Set(paths)) {
     try {
       if (!(await stat(file)).isFile()) continue;
       await access(file, constants.X_OK);
@@ -33,7 +41,8 @@ async function inspect(kind: LocalAgentKind, signal: AbortSignal) {
   const program = await executable(kind);
   if (!program) return { kind, name: names[kind], program, version: null, adapter: false };
   const call = async (args: string[]) => {
-    const { stdout } = await run(program, args, { cwd: homedir(), signal, timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true });
+    const [command, argv] = (await import("../agent-autoloop/host/command.ts")).commandLine([program, ...args]);
+    const { stdout } = await run(command, argv, { cwd: homedir(), signal, timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true });
     return stdout;
   };
   const version = (await call(["--version"]).catch(() => "")).match(/\b\d+\.\d+\.\d+(?:[-.][\w.-]+)?\b/)?.[0] ?? null;

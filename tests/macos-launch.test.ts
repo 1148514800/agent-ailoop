@@ -35,10 +35,12 @@ async function setup(t: TestContext, configured = true) {
   const counters = join(home, "commands");
   const logs = join(home, "Library", "Logs", "Agent Autoloop Console");
   const hubBin = join(workspace, "agent-autoloop", "bin");
-  await Promise.all([bin, hubHome, join(workspace, "scripts"), hubBin].map((path) => mkdir(path, { recursive: true })));
+  const modules = join(workspace, "node_modules");
+  await Promise.all([bin, hubHome, join(workspace, "scripts"), hubBin, modules].map((path) => mkdir(path, { recursive: true })));
   for (const part of ["启动控制台.command", "关闭控制台.command", "package-lock.json", "scripts/macos-command.sh", "scripts/macos-services.ts", "scripts/start-macos.ts", "scripts/stop-macos.ts", "scripts/hub.ts", "server", "shared", "agent-autoloop/kernel", "agent-autoloop/protocol"]) {
     await cp(join(root, part), join(workspace, part), { recursive: true });
   }
+  await cp(join(root, "node_modules", "yaml"), join(modules, "yaml"), { recursive: true });
   const config = JSON.stringify({
     url: "http://127.0.0.1:" + hubPort, owner: "fixture-owner", hub: { listen: "127.0.0.1:" + hubPort },
   });

@@ -1,3 +1,4 @@
+import { variantPrompt } from "./router-task-prompt.ts";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,14 +40,14 @@ export function isProjectProfile(name: string, projectId: string, profile?: Mode
   });
 }
 
-function makeProfile(base: Rule & { when: { source: string; types: string[] } }, projectId: string, profile: ModelProfile, settings: Overrides) {
-  const version = digest(JSON.stringify([base, profile, settings.model, settings.effort])).slice(0, 24);
+function makeProfile(base: Rule & { when: { source: string; types: string[] } }, projectId: string, profile: ModelProfile, settings: Overrides, legacy = false) {
+  const version = digest(JSON.stringify([base, profile, settings.model, settings.effort, ...(!legacy ? [variantPrompt(base.prompt)] : [])])).slice(0, 24);
   return {
     ...base,
     name: prefix(projectId, profile) + version,
     when: { source: base.when.source, types: [`router.profile.${version}.direct`, `router.profile.${version}.plan`] },
     execution: { ...settings, pauseWith: base.name },
-    prompt: [base.prompt, profilePrompt].filter(Boolean).join("\n\n"),
+    prompt: legacy ? [base.prompt, profilePrompt].filter(Boolean).join("\n\n") : variantPrompt(base.prompt),
   };
 }
 
@@ -66,7 +67,8 @@ export function profileRule(rules: Rules, projectId: string, profile: ModelProfi
   const { model, effort } = rule.execution;
   if ((model !== null && !modelId.test(model)) ||
       (effort !== null && !CODEX_EFFORTS.some((value) => value === effort))) return undefined;
-  const expected = makeProfile(base, projectId, profile, { model, effort });
+  const current = makeProfile(base, projectId, profile, { model, effort });
+  const expected = current.name === rule.name ? current : makeProfile(base, projectId, profile, { model, effort }, true);
   if (JSON.stringify(rule) !== JSON.stringify(expected) || conflicts(rules, expected)) return undefined;
   return expected;
 }
