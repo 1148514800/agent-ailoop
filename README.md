@@ -72,7 +72,7 @@ $env:AUTOLOOP_CONSOLE_PORT = "4180"
 npm start
 ```
 
-## AI Router v0.2
+## AI Router v0.3
 
 在「运行总览」输入消息。无需工具的问题由 Router 直接回答。需要读取项目、改代码或运行测试时，Router 把任务交给中台。复杂任务会标记为「建议先规划」，规划和执行都由配置的 Agent 完成。
 
@@ -125,14 +125,26 @@ AUTOLOOP_ROUTER_MODEL=你的模型名称
 
 验收时可在两个独立测试目录注册规则，分别提交创建不同测试文件的任务。点击提交结果的轮次链接，核对关联规则和事件类型。完成后分别检查各目录中的文件。
 
+### Codex 模型档位
+
+「Agent」页显示已加载的模型、思考强度、配置来源和 Worker。未显式设置的 Codex 字段显示「继承 Codex CLI 默认」。控制台不读取 Worker 的 Codex 用户配置。Router 分类模型来自 `AUTOLOOP_ROUTER_MODEL`，它单独显示在 AI Router 面板。
+
+1. 在「运行总览 → AI Router」选择使用 Codex 的项目，打开「模型档位设置」。
+2. 选择 Fast 或 Strong，从模型 ID 下拉框选取本机 Codex 缓存中列出的模型，也可以搜索或选择「自定义模型 ID」。没有本机缓存时仍可手动填写。模型和思考强度都可以选择继承接单机器上的 Codex CLI 默认值。各模型支持的强度不同。
+3. 提交任务时选择执行档位。「AI 自动判断」可以使用「自动选择」，模型在项目已配置的档位中选择，并另行判断是否先规划。未配置任何档位时自动使用默认配置。「直接创建任务」可手动选档位，仍然无需调用分类模型。
+
+Fast 和 Strong 是项目的执行档位。Agent 自身配置的模型、思考强度以及 Codex 的 `service_tier` 都照常保留。服务端为每次变更登记一个版本化的 `ai-profile-*` 规则，沿用原有 Agent、工作目录、执行权限与并发组。中台按这个版本生成给 Worker 的 `job.agent.model` 和 `job.agent.effort`，Codex 插件把它们传成命令行参数。保留旧版档位规则供已有 Run 的重试、审批续办和复查使用。手动变更了项目基础规则后，重新保存档位即可应用新的基础设置。
+
 ### API 与数据流
 
-- `GET /api/router/projects` 返回项目 ID、显示名称和规则名。网页管理的项目还返回供移除确认使用的目录。规则或目录不可用时显示错误。
+- `GET /api/router/projects` 返回项目的执行配置、可用档位、分类模型及项目标识。网页管理的项目还返回供移除确认使用的目录。规则或目录不可用时显示错误。
 - `GET /api/router/project-options` 返回已登记的 Agent。用 `POST /api/router/projects` 提交 `name`、`directory`、`agentId` 添加项目，用 `POST /api/router/projects/remove` 提交 `projectId` 取消登记。
+- `GET /api/router/model-options` 返回本机 Codex 缓存中可见的模型 ID。
+- `GET /api/router/agent-models` 返回已加载配置的模型摘要。`POST /api/router/projects/profile` 接收 `projectId`、`profile`（`fast` 或 `strong`）、`model` 和 `effort`，模型和强度可传空字符串。
 - `POST /api/router/message` 接收 `requestId`、`message` 和可选的 `projectId`。省略项目时使用 `default`。模型仅接收系统提示词和消息，直接回答不会创建事件。
-- `POST /api/router/task` 接收 `requestId`、`projectId`、`message` 和布尔值 `needsPlan`。两个提交接口均需要本机浏览器会话、同源请求和 `X-Console-CSRF`，消息最多 4000 个 Unicode 字符。
-- 服务端把项目 ID 映射到可信规则，核对磁盘和生效规则版本后提交事件。中台匹配规则、创建轮次，Worker 从规则取 Agent 和 `cwd`。两种模式共用事件和轮次查询逻辑。任务响应包含 `eventId`、`status` 和关联的 `run`。
-- 重试使用同一个 UUID、项目、模式和消息。本机中台数据目录下的 `router-requests/` 保存请求摘要、执行决策和事件编号，供控制台重启后恢复。记录不保存原文、模型回复或密钥，也不会自动清理。已知事件编号时直接读取，提交回执丢失时先按外部事件 ID 查询。旧版中台无法按外部 ID 查询时，使用同一事件 ID 走中台去重。
+- `POST /api/router/task` 接收 `requestId`、`projectId`、`message` 和布尔值 `needsPlan`。两种提交接口都可以带 `executionProfile`（`default`、`fast`、`strong`，仅 AI 分类支持 `auto`），省略使用 `default`。写操作均需要本机浏览器会话、同源请求和 `X-Console-CSRF`，消息最多 4000 个 Unicode 字符。
+- 服务端把项目 ID 映射到可信规则，核对磁盘和生效规则版本后提交事件。中台匹配规则、创建轮次，Worker 从规则取 Agent 和 `cwd`。两种模式共用事件和轮次查询逻辑。任务响应包含 `eventId`、`status`、关联的 `run`、服务端确认的 `execution_profile` 和 `execution`。
+- 重试使用同一个 UUID、项目、模式、消息和档位选项。本机中台数据目录下的 `router-requests/` 保存请求摘要、执行决策、绑定的执行配置和事件编号，供控制台重启后恢复。记录不保存原文、模型回复或密钥，也不会自动清理。已知事件编号时直接读取，提交回执丢失时先按外部事件 ID 查询。旧版中台无法按外部 ID 查询时，使用同一事件 ID 走中台去重。
 
 ## 数据与操作
 
@@ -180,6 +192,6 @@ npm run test:browser -- --screenshots
 ## 已知限制
 
 - 审批历史受中台快照限制，最多显示最近 20 张已处理卡片。暂停详情最多显示最近 20 条待补跑事件，实际补跑范围由中台按起始时间计算。
-- 时间线展示中台日志。当前协议没有 Agent 实时输出流、模型和凭据管理或规则文件编辑接口。
+- 时间线展示中台日志。CLI 或模型服务未回传实际采用的模型和思考强度，控制台显示已确认的配置。
 - 外部定时任务只展示计划。中台规则的暂停、运行和补跑操作只针对中台可控制的规则。
 - 上游版本较旧时，可能缺少用量、规则控制或其他扩展字段。浏览器验收在 macOS 上执行，Windows 与 Linux 的本地启动流程尚未实机验证。

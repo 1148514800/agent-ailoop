@@ -2,12 +2,16 @@ import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { RouterError } from "./router.ts";
+import type { ExecutionConfig, ExecutionProfile } from "../shared/router.ts";
 
 export type SavedRequest = {
   digest: string;
   target: string | null;
   needsPlan: boolean | null;
   route?: string;
+  profile?: ExecutionProfile;
+  rule?: string;
+  execution?: ExecutionConfig;
 };
 
 export function routerRecords(directory: string, id: string) {

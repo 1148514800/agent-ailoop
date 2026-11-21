@@ -20,6 +20,9 @@ import { hubClient } from "../agent-autoloop/protocol/client.ts";
 const home = await mkdtemp(join(tmpdir(), "autoloop-router-test-"));
 process.env.AGENT_AUTOLOOP_HOME = home;
 process.env.AGENT_AUTOLOOP_RULES = join(home, "rules.json");
+const codexHome = join(home, "codex");
+process.env.CODEX_HOME = codexHome;
+await mkdir(codexHome);
 const rule = { name: "ai-router", when: { source: "workstation", types: ["router.task.*"] }, to: "lab", cwd: home, prompt: "测试。", parallel: 1 };
 const rules = { sources: { workstation: { name: "工作站" }, other: { name: "其他来源" } }, agents: {
   lab: { name: "试验", use: "command", command: ["node", "--version"], worker: "offline-worker" },
@@ -40,10 +43,14 @@ const model = createServer(async (req, res) => {
   for await (const chunk of req) chunks.push(chunk);
   const raw = Buffer.concat(chunks).toString();
   assert.ok(!raw.includes(owner) && !raw.includes(source) && !raw.includes(modelKey));
-  const message = JSON.parse(raw).messages[1].content;
+  const [system, { content: message }] = JSON.parse(raw).messages;
+  const useProfiles = system.content.includes("允许的执行档位：fast");
+  const profile = message.includes("无权档位") ? "arbitrary-model" : message.includes("重构") ? "strong" : "fast";
   const decision = message === "你好" || message === "检查模型回应" ? {
     action: "reply", needs_plan: false, answer: message === "你好" ? "你好，有什么可以帮你？" : modelKey + " " + source,
-  } : { action: "execute", needs_plan: message.includes("重构"), answer: "" };
+  } : { action: "execute", needs_plan: message.includes("重构") || message.includes("简单但要规划"), answer: "",
+    ...(useProfiles && { execution_profile: profile }),
+  };
   res.end(JSON.stringify({ choices: [{ message: { content: message === "非法" ? "bad json" : JSON.stringify(decision) } }] }));
 });
 function address(server: Server) { return "http://127.0.0.1:" + (server.address() as AddressInfo).port; }
@@ -89,6 +96,29 @@ test("missing session, invalid CSRF and foreign origins never reach the model", 
   assert.equal((await post("你好", randomUUID(), { cookie })).status, 403);
   assert.equal((await post("你好", randomUUID(), { cookie, "x-console-csrf": csrf, origin: "https://another.invalid" })).status, 403);
   assert.equal(modelCalls, 0);
+});
+
+test("model options expose only distinct visible model IDs from the local Codex cache", async () => {
+  const endpoint = base + "/api/router/model-options";
+  const fetchOptions = () => fetch(endpoint, { headers: { cookie } });
+  assert.equal((await fetch(endpoint)).status, 401);
+  assert.deepEqual(await (await fetchOptions()).json(), { models: [] });
+
+  const file = join(codexHome, "models_cache.json");
+  await writeFile(file, JSON.stringify({
+    identity: { token: owner },
+    models: [
+      { visibility: "list", slug: "available-model", display_name: source },
+      { visibility: "list", slug: "available-model" },
+      { visibility: "hide", slug: "hidden-model" },
+      { visibility: "list", slug: "--config" },
+      { visibility: "list", slug: source },
+      { visibility: "list", slug: "provider/other-model" },
+    ],
+  }));
+  assert.deepEqual(await (await fetchOptions()).json(), { models: ["available-model", "provider/other-model"] });
+  await writeFile(file, "{invalid");
+  assert.deepEqual(await (await fetchOptions()).json(), { models: [] });
 });
 
 test("direct replies and invalid model decisions do not create hub events", async () => {
@@ -445,5 +475,141 @@ test("web projects load into the Hub, execute through registered agents and reti
     await writeFile(file, original);
     hubRuntime.reloadRules();
     await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("versioned profiles reach the Worker with the selected model, effort and project directory", async () => {
+  const disk = process.env.AGENT_AUTOLOOP_RULES!;
+  const original = await readFile(disk, "utf8");
+  const config = JSON.parse(original);
+  const project = { ...rule, to: "profile-codex" };
+  config.rules = [project];
+  config.agents["profile-codex"] = { name: "Codex", use: "codex", worker: "profile-worker", access: "read", maxActive: 1 };
+  await writeFile(disk, JSON.stringify(config));
+  hubRuntime.reloadRules();
+  const previousKey = key;
+  key = "";
+  const headers = { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf };
+  const api = (path: string, body?: object) => fetch(base + "/api/router/" + path, {
+    headers, ...(body && { method: "POST", body: JSON.stringify(body) }),
+  });
+  const save = (profile: string, model: string, effort: string) => api("projects/profile", { projectId: "default", profile, model, effort });
+  const dispatch = (executionProfile: string, needsPlan: boolean, requestId = randomUUID()) =>
+    api("task", { projectId: "default", requestId, executionProfile, needsPlan, message: "验证执行参数" });
+  try {
+    const missing = await (await api("agent-models")).json();
+    assert.equal(missing.agents["profile-codex"].model, null);
+    assert.equal(missing.agents["profile-codex"].effort, null);
+    assert.equal((await dispatch("fast", false)).status, 409);
+    assert.equal((await dispatch("auto", false)).status, 400);
+    assert.equal((await api("task", { projectId: "default", requestId: randomUUID(), executionProfile: null, needsPlan: false, message: "校验档位" })).status, 400);
+    assert.equal((await save("fast", "--config", "low")).status, 400);
+    assert.equal((await save("fast", "verified-fast", "turbo")).status, 400);
+    assert.equal((await save("strong", "verified-strong", "high")).status, 200);
+    assert.equal((await save("fast", "verified-fast", "low")).status, 200);
+    const list = await (await api("projects")).json();
+    assert.equal(list.projects[0].profiles.fast.model, "verified-fast");
+    assert.equal(state().ruleExecutionOverrides, true);
+    const current = await readFile(disk, "utf8");
+    const overlapping = JSON.parse(current);
+    overlapping.rules.push({ ...project, name: "profile-catch-all", when: { source: "workstation", types: ["router.profile.*"] } });
+    await writeFile(disk, JSON.stringify(overlapping));
+    hubRuntime.reloadRules();
+    assert.equal((await save("fast", "verified-fast", "low")).status, 409);
+    assert.equal((await dispatch("fast", false)).status, 409);
+    await writeFile(disk, current);
+    hubRuntime.reloadRules();
+
+    const id = randomUUID();
+    const calls = modelCalls;
+    const fast = await (await dispatch("fast", true, id)).json();
+    const strong = await (await dispatch("strong", false)).json();
+    assert.equal(modelCalls, calls);
+    assert.equal(fast.execution.model, "verified-fast");
+    assert.equal(strong.execution.effort, "high");
+    assert.equal((await dispatch("strong", true, id)).status, 409);
+    assert.equal((await save("fast", "updated-fast", "medium")).status, 200);
+    assert.deepEqual(JSON.parse(await readFile(disk, "utf8")).agents, config.agents);
+    const retry = await createRouter(options)({ projectId: "default", requestId: id, executionProfile: "fast", needsPlan: true, message: "验证执行参数" }, new AbortController().signal, "direct");
+    assert.deepEqual(retry, fast);
+    const worker = hubClient(hubUrl, hubRuntime.addKey("worker", "profile-worker"));
+    for (const [result, model, effort, suffix] of [[fast, "verified-fast", "low", ".plan"], [strong, "verified-strong", "high", ".direct"]]) {
+      const { job } = await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true });
+      assert.equal(job.run, result.run.id);
+      assert.equal(job.agent.id, "profile-codex");
+      assert.equal(job.agent.model, model);
+      assert.equal(job.agent.effort, effort);
+      assert.equal(job.agent.access, "read");
+      assert.equal(job.rule.cwd, project.cwd);
+      assert.ok(job.context.events[0].type.endsWith(suffix));
+      if (result === fast) {
+        const concurrent = await worker.work({ claim: randomUUID(), wait: 0, running: [job.run], capacity: true });
+        assert.ok(!concurrent.job);
+      }
+      await worker.result(job.run, job.token, { outcome: "done" });
+    }
+
+    const queued = await (await dispatch("strong", true)).json();
+    const ownerClient = hubClient(hubUrl, owner);
+    await ownerClient.cancel(queued.run.id);
+    assert.equal(state().runs.find(({ id }) => id === queued.run.id)?.state, "cancelled");
+    assert.ok((await ownerClient.why(queued.run.id)).length > 0);
+
+    key = modelKey;
+    const auto = (message: string, executionProfile = "auto", requestId = randomUUID()) =>
+      api("message", { projectId: "default", requestId, executionProfile, message });
+    const beforeInvalid = state().seq;
+    assert.equal((await auto("无权档位")).status, 502);
+    assert.equal(state().seq, beforeInvalid);
+    for (const [message, choice, expected, model, effort, plan] of [
+      ["检查 README", "auto", "fast", "updated-fast", "medium", false],
+      ["简单但要规划", "auto", "fast", "updated-fast", "medium", true],
+      ["分析并重构模块", "auto", "strong", "verified-strong", "high", true],
+      ["分析并重构模块", "fast", "fast", "updated-fast", "medium", true],
+    ] as const) {
+      const requestId = randomUUID();
+      const before = modelCalls;
+      const response = await auto(message, choice, requestId);
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.execution_profile, expected);
+      assert.equal(result.needs_plan, plan);
+      assert.equal((await (await auto(message, choice, requestId)).json()).run.id, result.run.id);
+      assert.equal(modelCalls, before + 1);
+      const { job } = await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true });
+      assert.equal(job.run, result.run.id);
+      assert.equal(job.agent.model, model);
+      assert.equal(job.agent.effort, effort);
+      assert.equal(job.rule.cwd, project.cwd);
+      if (expected !== "strong") {
+        await worker.result(job.run, job.token, { outcome: "done" });
+        continue;
+      }
+      await worker.result(job.run, job.token, { outcome: "failed", error: "临时错误" });
+      assert.equal(state().runs.find(({ id }) => id === job.run)?.state, "queued");
+      assert.equal((await save("strong", "new-strong", "xhigh")).status, 200);
+      const deferred = state().runs.find(({ id }) => id === job.run)!;
+      const retryTime = Date.parse(deferred.notBefore) + 100;
+      const retried = hubRuntime.execute("claimNext", ["profile-worker", randomUUID()], retryTime);
+      assert.equal(retried.run, job.run);
+      assert.equal(retried.agent.model, model);
+      assert.equal(retried.agent.effort, effort);
+      assert.equal(retried.rule.cwd, project.cwd);
+      hubRuntime.execute("finish", [retried.run, retried.token, { outcome: "done" }], retryTime + 1);
+    }
+
+    assert.equal((await save("fast", "", "")).status, 200);
+    const inherited = await (await dispatch("fast", false)).json();
+    const { job } = await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true });
+    assert.equal(job.run, inherited.run.id);
+    assert.equal(inherited.execution.model, null);
+    assert.equal(inherited.execution.effort, null);
+    assert.equal(job.agent.model, undefined);
+    assert.equal(job.agent.effort, undefined);
+    await worker.result(job.run, job.token, { outcome: "done" });
+  } finally {
+    key = previousKey;
+    await writeFile(disk, original);
+    hubRuntime.reloadRules();
   }
 });

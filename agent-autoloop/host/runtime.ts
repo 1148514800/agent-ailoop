@@ -163,6 +163,7 @@ export function stateOf(now = Date.now(), before?: number) {
     return {
       seq: latest.seq,
       rulesRevision: rulesRevision(configuration),
+      ruleExecutionOverrides: true,
       ...state(now, before, configuration, { all, view, unrouted }),
     };
   } finally {

@@ -84,9 +84,10 @@ function route(method: string | undefined, url: URL, req: IncomingMessage): Rout
 }
 
 function stateForBrowser(value: Row) {
-  const { agents, rulesRevision: _rulesRevision, ...rest } = value;
+  const { agents, rulesRevision, ...rest } = value;
   return {
-    ...rest, agents: Array.isArray(agents) ? (agents as Row[]).map(({ id, name, use, worker, seenAt, online, totals }) =>
+    ...rest, ...(typeof rulesRevision === "string" && /^[a-f0-9]{64}$/.test(rulesRevision) && { rulesRevision }),
+    agents: Array.isArray(agents) ? (agents as Row[]).map(({ id, name, use, worker, seenAt, online, totals }) =>
       ({ id, name, use, worker, seenAt, online, totals })) : agents,
   };
 }
@@ -187,20 +188,25 @@ export function createConsole(options: {
       }
       const routerProjects = req.method === "GET" && url.pathname === "/api/router/projects";
       const routerSubmit = req.method === "POST" && ["/api/router/message", "/api/router/task"].includes(url.pathname);
+      const modelOptions = req.method === "GET" && url.pathname === "/api/router/model-options";
+      const agentModels = req.method === "GET" && url.pathname === "/api/router/agent-models";
+      const profileSave = req.method === "POST" && url.pathname === "/api/router/projects/profile";
       const projectOptions = req.method === "GET" && url.pathname === "/api/router/project-options";
       const projectChange = req.method === "POST" && ["/api/router/projects", "/api/router/projects/remove"].includes(url.pathname);
-      if ((routerProjects || routerSubmit || projectOptions || projectChange) && !url.search) {
+      if ((routerProjects || routerSubmit || projectOptions || projectChange || agentModels || modelOptions || profileSave) && !url.search) {
         if (!options.router) throw new RouterError(503, "控制台未加载 AI Router。");
         const gone = new AbortController();
         res.once("close", () => gone.abort());
         const signal = AbortSignal.any([gone.signal, session.stop.signal,
           AbortSignal.timeout(Math.max(1, session.until - Date.now()))]);
         let result;
-        if (routerProjects) result = await options.router.projects(signal);
+        if (agentModels) result = await options.router.agentModels(signal);
+        else if (modelOptions) result = await options.router.modelOptions(signal);
+        else if (routerProjects) result = await options.router.projects(signal);
         else if (projectOptions) result = await options.router.projectOptions(signal);
         else {
           const body = await readObject(req);
-          result = projectChange
+          result = profileSave ? await options.router.changeProfile(body, signal) : projectChange
             ? await options.router.changeProject(url.pathname.endsWith("/remove") ? "remove" : "create", body, signal)
             : await options.router(body, signal, url.pathname.endsWith("/task") ? "direct" : "auto");
         }

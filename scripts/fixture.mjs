@@ -18,6 +18,7 @@ export async function fixture(home) {
     sources: { local: { name: "本地事件" } },
     agents: {
       codex: { name: "Codex", use: "codex", worker: "studio-mac" },
+      "router-codex": { name: "项目 Codex", use: "codex", worker: "router-worker" },
       claude: { name: "Claude Code", use: "claude", worker: "studio-mac" },
       router: { name: "Router 测试 Agent", use: "command", worker: "router-worker", command: ["node", "--version"] },
       runner: { name: "巡检脚本", use: "command", worker: "ops-runner", command: ["node", "-e", "process.exit(0)"] },

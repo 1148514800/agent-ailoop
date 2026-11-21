@@ -8,6 +8,7 @@ import type { Hub } from "./hub.ts";
 import { configSnapshot, dataHome, digest, eventPrefix, loadRules, metadataFile, parseRouterRules, PROJECT_PREFIX,
   readProjectMetadata, replaceConfig, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
 import { RouterError } from "./router.ts";
+import { isProjectProfile } from "./router-profiles.ts";
 
 type SourceHub = Hub & { source: NonNullable<Hub["source"]> };
 type Rules = ReturnType<typeof parseRouterRules>;
@@ -110,14 +111,16 @@ export function projectManagement(deps: {
           throw new RouterError(409, "只能移除由网页添加且仍由网页管理的项目。");
         }
         if (entry.removed) return { projectId: id };
-        const totals = active.lines?.find((line) => line.id === rule.name)?.totals;
-        if (!totals || !Array.isArray(active.cards) || !Array.isArray(active.timers) ||
-            ![totals.queued, totals.running, totals.unknown].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+        const related = (name: string) => name === rule.name || isProjectProfile(name, id);
+        const lines = active.lines?.filter((line) => related(line.id)) ?? [];
+        const totals = lines.flatMap(({ totals }) => totals ? [totals.queued, totals.running, totals.unknown] : [NaN]);
+        if (!lines.some((line) => line.id === rule.name) || !Array.isArray(active.cards) || !Array.isArray(active.timers) ||
+            !totals.every((value) => Number.isSafeInteger(value) && value >= 0)) {
           throw new RouterError(503, "无法确认该项目的任务状态，请稍后重试。");
         }
-        const remaining = totals.queued + totals.running + totals.unknown;
-        const timers = active.timers.filter((timer) => timer.rule === rule.name).length;
-        const cards = active.cards.filter((card) => card.rule === rule.name && card.kind === "ask").length;
+        const remaining = totals.reduce((sum, count) => sum + count, 0);
+        const timers = active.timers.filter((timer) => related(timer.rule)).length;
+        const cards = active.cards.filter((card) => card.rule !== null && related(card.rule) && card.kind === "ask").length;
         if (remaining || timers || cards) {
           const reasons = [remaining && `${remaining} 个未完成任务`, timers && `${timers} 个待复查事项`, cards && `${cards} 个待回答审批`].filter(Boolean);
           throw new RouterError(409, "无法移除该项目。还有 " + reasons.join("、") + "，请处理完后重试。");
@@ -181,5 +184,5 @@ export function projectManagement(deps: {
       return { projectId: id };
     });
   }
-  return { projectOptions, changeProject };
+  return { projectOptions, changeProject, confirmLoaded };
 }

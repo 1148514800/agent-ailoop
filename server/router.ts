@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
-import type { ExecuteDecision, RouterReply } from "../shared/router.ts";
+import type { ExecuteDecision, ExecutionProfile, ModelProfile, RouterReply } from "../shared/router.ts";
 import { ROUTER_PROMPT } from "./router-prompt.ts";
 
 export class RouterError extends Error {
@@ -56,15 +56,20 @@ export async function localRouterKey(root: string) {
   return (await localRouterEnv(root).catch(() => process.env)).AUTOLOOP_ROUTER_API_KEY?.trim();
 }
 
-function decisionOf(content: string): Decision {
+function decisionOf(content: string, profiles: readonly ExecutionProfile[]): Decision {
   const value = JSON.parse(content);
-  if (!value || typeof value !== "object" || Object.keys(value).sort().join(",") !== "action,answer,needs_plan" ||
+  if (!value || typeof value !== "object" ||
       typeof value.needs_plan !== "boolean" || typeof value.answer !== "string") throw new RouterError(502, BAD_OUTPUT);
-  if (value.action === "reply" && !value.needs_plan && value.answer.trim() && [...value.answer].length <= 1000) {
+  const fields = Object.keys(value).sort().join(",");
+  const basic = fields === "action,answer,needs_plan";
+  if (basic && value.action === "reply" && !value.needs_plan && value.answer.trim() && [...value.answer].length <= 1000) {
     return { action: "reply", needs_plan: false, answer: value.answer.trim() };
   }
   if (value.action === "execute" && value.answer === "") {
-    return { action: "execute", needs_plan: value.needs_plan, answer: "" };
+    if (basic && profiles[0] === "default") return { action: "execute", needs_plan: value.needs_plan, answer: "" };
+    if (fields === "action,answer,execution_profile,needs_plan" && profiles.some((profile) => profile === value.execution_profile)) {
+      return { action: "execute", needs_plan: value.needs_plan, execution_profile: value.execution_profile, answer: "" };
+    }
   }
   throw new RouterError(502, BAD_OUTPUT);
 }
@@ -86,16 +91,18 @@ async function modelText(response: Response) {
 }
 
 export async function classify(
-  config: Config, message: string, signal: AbortSignal, request = fetch, timeoutMs = 15_000,
+  config: Config, message: string, signal: AbortSignal, request = fetch, timeoutMs = 15_000, available: readonly ModelProfile[] = [],
 ): Promise<Decision> {
   const deadline = AbortSignal.timeout(timeoutMs);
+  const profiles: readonly ExecutionProfile[] = available.length ? available : ["default"];
+  const prompt = ROUTER_PROMPT + "\n允许的执行档位：" + profiles.join("、") + "。";
   try {
     const response = await request(config.endpoint, {
       method: "POST", redirect: "error", signal: AbortSignal.any([signal, deadline]),
       headers: { authorization: "Bearer " + config.key, "content-type": "application/json" },
       body: JSON.stringify({
         model: config.model, max_tokens: 480,
-        messages: [{ role: "system", content: ROUTER_PROMPT }, { role: "user", content: message }],
+        messages: [{ role: "system", content: prompt }, { role: "user", content: message }],
       }),
     });
     if (!response.ok) {
@@ -107,7 +114,7 @@ export async function classify(
       const choice = JSON.parse(raw)?.choices?.[0];
       if (typeof choice?.message?.content !== "string" || choice.message.tool_calls?.length ||
           choice.finish_reason === "length" || choice.finish_reason === "tool_calls") throw new Error();
-      return decisionOf(choice.message.content);
+      return decisionOf(choice.message.content, profiles);
     } catch { throw new RouterError(502, BAD_OUTPUT); }
   } catch (error) {
     if (deadline.aborted) throw new RouterError(504, "Router 模型请求超时，任务未提交。");

@@ -26,6 +26,7 @@ export type Channel = Presence & { lastFailure?: { card: number; tries: number; 
 export type Elsewhere = { id: string; name: string; agent: string; source: string; every: string; next: string; where: string };
 export type Timer = { rule: string; lane: string; key: string; about: string; at: string };
 export type State = {
+  rulesRevision?: string;
   seq: number; now: string; timezone: string; totals: Totals; spending?: { today: Spending; week: Spending };
   runs: Run[]; cards: Card[]; recentCards: Card[]; lines: Rule[]; agents: Agent[]; channels: Channel[];
   sources: { id: string; name: string; events: number }[];

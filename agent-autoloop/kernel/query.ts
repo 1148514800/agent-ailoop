@@ -10,8 +10,11 @@ export function configuration(view: View, version?: number): Rules {
 }
 /** The owner's pause that keeps a rule from taking work at this moment, if there is one. */
 export function pauseOf(view: View, rule: Rule, now: number): Row | null {
-  const row = view.get("pauses", rule.name);
-  return row && (row.until === null || Date.parse(row.until) > now) ? row : null;
+  const active = (name: string) => {
+    const row = view.get("pauses", name);
+    return row && (row.until === null || Date.parse(row.until) > now) ? row : null;
+  };
+  return active(rule.name) ?? (rule.execution?.pauseWith ? active(rule.execution.pauseWith) : null);
 }
 
 export const workerOf = (view: View, run: Row) => configuration(view, run.rules_version).agents[run.agent]?.worker;
@@ -140,8 +143,14 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
 
 export function jobOf(view: View, run: Row, env: Environment): Job {
   const rules = configuration(view, run.rules_version);
-  const { name, cwd, skill, prompt, title, emits } = ruleOf(rules, run.rule)!;
+  const { name, cwd, skill, prompt, title, emits, execution } = ruleOf(rules, run.rule)!;
   const { maxActive: _maxActive, ...agent } = rules.agents[run.agent];
+  if (execution) {
+    if (execution.model === null) delete agent.model;
+    else agent.model = execution.model;
+    if (execution.effort === null) delete agent.effort;
+    else agent.effort = execution.effort;
+  }
   const events = eventsOf(view, run.id);
   const eventIds = events.map((event) => event.id);
   const thread = { rule: run.rule, lane: run.lane };

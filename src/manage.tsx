@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Activity, Bot, CalendarClock, Clock3, GitFork, History, Link2, ListTodo, Pause as PauseIcon, Play, Radio, RotateCcw, Server, Settings2, ShieldCheck, Workflow } from "lucide-react";
 import type { Pause, Rule, State } from "../shared/types.ts";
-import { agentName, amount, fmtDate, rulePath } from "./data.ts";
+import type { ExecutionConfig } from "../shared/router.ts";
+import { agentName, amount, api, fmtDate, rulePath } from "./data.ts";
+import { configSource, configValue } from "./router-models.tsx";
 import type { Live } from "./live.ts";
 import type { Act } from "./runs.tsx";
 import { Badge, Button, Details, Drawer, Empty, Heading, Panel, TextLink } from "./ui.tsx";
@@ -124,15 +126,26 @@ export function Rules({ state, name, close, act, choose, disabled, resumed, setR
 }
 
 export function Agents({ state }: { state: State }) {
+  const [models, setModels] = useState<Record<string, ExecutionConfig>>({});
+  const rulesRevision = state.rulesRevision;
+  useEffect(() => {
+    const controller = new AbortController();
+    setModels({});
+    void api<{ agents: Record<string, ExecutionConfig> }>("/router/agent-models", { signal: controller.signal })
+      .then(({ agents }) => { if (!controller.signal.aborted) setModels(agents); }).catch(() => {});
+    return () => controller.abort();
+  }, [rulesRevision]);
   const online = state.agents.filter((agent) => agent.online).length;
   return <>
     <Heading title="Agent" description="查看配置中的 Agent、所属 Worker 和历史执行情况。"><Badge tone={online ? "green" : "neutral"} dot>{online}/{state.agents.length} 在线</Badge></Heading>
-    <Panel title="已配置 Agent" icon={Bot} subtitle="在线状态来自所属 Worker 的心跳。">
+    <Panel title="已配置 Agent" icon={Bot} subtitle="在线状态来自 Worker 心跳。此处显示模型和思考强度的配置值，CLI 未回传实际运行值。">
       {state.agents.length ? <div className="table-scroll"><table className="agents-table"><thead>
-        <tr><th>Agent</th><th>类型</th><th>Worker</th><th>在线状态</th><th>执行中</th><th>已完成</th><th>无需处理</th><th>最近心跳</th></tr>
+        <tr><th>Agent</th><th>类型</th><th>Worker</th><th>模型</th><th>思考强度</th><th>配置来源</th><th>在线状态</th><th>执行中</th><th>已完成</th><th>无需处理</th><th>最近心跳</th></tr>
       </thead><tbody>{state.agents.map((agent) => <tr key={agent.id}>
         <td><a className="run-name" href={"#runs?agent=" + encodeURIComponent(agent.id)}><span className="agent-ref"><Bot size={16} />{agent.name}</span><small className="mono">{agent.id}</small></a></td>
-        <td><code>{agent.use}</code></td><td><code>{agent.worker}</code></td><td><Badge tone={agent.online ? "green" : "neutral"} dot>{agent.online ? "在线" : "离线"}</Badge></td>
+        <td><code>{agent.use}</code></td><td><code>{agent.worker}</code></td>
+        <td>{configValue(models[agent.id], "model")}</td><td>{configValue(models[agent.id], "effort")}</td><td>{configSource(models[agent.id])}</td>
+        <td><Badge tone={agent.online ? "green" : "neutral"} dot>{agent.online ? "在线" : "离线"}</Badge></td>
         <td className="mono">{agent.totals.running}</td><td className="mono">{agent.totals.done}</td><td className="mono">{agent.totals.nothing}</td><td>{fmtDate(agent.seenAt, state.timezone)}</td>
       </tr>)}</tbody></table></div> : <Empty title="暂无已配置的 Agent" icon={Bot} />}
     </Panel>

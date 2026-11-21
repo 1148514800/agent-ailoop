@@ -78,6 +78,7 @@
       "group": "ops", // 同一组一次一轮，默认就是规则名
       "parallel": 3, // 写了就按对象分事项：同一对象一次一轮，这一组最多 3 轮，还受接单程序的 worker.capacity 限制（默认 2）
       "resume": true, // 同一事项的新事件接着上一轮的会话，默认每次开新会话
+      "execution": { "model": "…", "effort": "high" }, // 可选：该规则派发时覆盖 Agent 的模型和推理强度
       "tell": "needed", // always 每轮做成都发（没事可做、没跑成不发）/ needed 只在有卡片时（默认）/ never 只压住回执里的通知，提问和中台自己的告警照发
       "emits": { "source": "shop", "types": ["pr.*"] }, // 回执里能发什么事件，不写就不能发
       "channels": ["feishu"], // 这条规则的卡片和通知只发到这几个通道，不写就照 defaultChannels
@@ -101,6 +102,8 @@
 ```
 
 `cwd` 由接单电脑解释，可用 Unix 绝对路径、Windows 盘符或 UNC 路径、`~/` 或 `~\` 开头的家目录路径；中台与接单电脑可以用不同操作系统。接受 Windows 路径是兼容的能力扩展，原有 `/v1`、规则与插件用法不变。
+
+可选的 `execution` 来自可信规则。写了就同时给出 `model` 和 `effort`，各项为字符串或 `null`；`null` 让中台从这一轮的 `job.agent` 省略该项，由接单端使用自身默认配置。可用 `pauseWith` 指定另一个规则名，让该规则也跟随它的暂停。接单接口的字段、Agent 身份、接单程序和权限不变。旧规则文件可直接沿用。支持这个字段的中台会在 `GET /v1/state` 返回 `ruleExecutionOverrides: true`。
 
 `elsewhere` 是在别处定时跑的任务：中台不启动它们，只在 `agent-autoloop status` 里列出来，它们要找你时用 `POST /v1/tell`。写了 `cwd`（还要写 `skill` 或 `prompt`）的也能问你：卡片带选项，你答了，中台像规则的一轮那样叫醒 `to`，在 `cwd` 照 `skill`、`prompt` 接着做，这一轮的组就是任务名，一次一轮，不接定时任务自己的会话。规则写错了，文件改动不生效，旧规则继续跑，并推一张卡片告诉你错在哪。可以给它写上 `model` 和 `effort`，也就是应用里给这个任务设的模型和推理强度：中台不用它们启动任何东西，只随 `GET /v1/state` 的 `elsewhere` 带出来，给显示这些任务的客户端用；没写就不带。这是兼容的扩展，原有规则文件不用改。
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
@@ -10,7 +10,15 @@ import { fixture } from "./fixture.mjs";
 
 const sandbox = await mkdtemp(join(tmpdir(), "autoloop-console-"));
 const home = join(sandbox, "hub");
+const codexHome = join(sandbox, "codex");
 await mkdir(home);
+await mkdir(codexHome);
+await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({
+  models: [
+    { slug: "browser-test-model", visibility: "list" },
+    { slug: "other-test-model", visibility: "list" },
+  ],
+}));
 const screenshots = join(import.meta.dirname, "../docs/screenshots");
 const shot = process.argv.includes("--screenshots");
 let hub, server, browser, model;
@@ -37,7 +45,7 @@ async function start() {
   server = spawn(process.execPath, ["server/main.ts"], {
     cwd: join(import.meta.dirname, ".."),
     env: {
-      ...process.env, AGENT_AUTOLOOP_HOME: home, AUTOLOOP_CONSOLE_PORT: "0", AUTOLOOP_HUB_URL: "",
+      ...process.env, CODEX_HOME: codexHome, AGENT_AUTOLOOP_HOME: home, AUTOLOOP_CONSOLE_PORT: "0", AUTOLOOP_HUB_URL: "",
       AUTOLOOP_ROUTER_ENABLED: "true", AUTOLOOP_ROUTER_BASE_URL: "http://127.0.0.1:" + model.address().port + "/v1",
       AUTOLOOP_ROUTER_API_KEY: "browser-mock-key", AUTOLOOP_ROUTER_MODEL: "fixture-model",
     },
@@ -291,8 +299,64 @@ try {
   await registered.waitFor({ state: "detached" });
   assert.equal(await project.inputValue(), "default");
 
+  await routerPanel.getByRole("button", { name: "添加项目", exact: true }).click();
+  await addProject.getByLabel("项目名称").fill("模型档位项目");
+  await directoryInput.fill(directory);
+  await addProject.getByLabel("执行 Agent").selectOption("router-codex");
+  await addProject.getByRole("button", { name: "保存项目" }).click();
+  const tierProject = project.getByRole("option", { name: /模型档位项目/ });
+  await tierProject.waitFor({ state: "attached" });
+  const tier = routerPanel.getByLabel("执行档位");
+  assert.equal(await tier.getByRole("option", { name: "Fast（未配置）" }).isDisabled(), true);
+  const settings = routerPanel.getByRole("button", { name: "模型档位设置" });
+  await settings.click();
+  const profile = page.getByRole("dialog", { name: "模型档位设置" });
+  const modelPicker = profile.getByLabel("模型 ID", { exact: true });
+  assert.equal(await modelPicker.inputValue(), "");
+  const searchModel = profile.getByRole("searchbox", { name: "搜索模型" });
+  await searchModel.fill("browser");
+  assert.equal(await modelPicker.getByRole("option", { name: "other-test-model" }).count(), 0);
+  await modelPicker.selectOption("browser-test-model");
+  await profile.getByLabel("思考强度").selectOption("low");
+  await profile.getByRole("button", { name: "保存档位" }).click();
+  await routerPanel.getByText("Fast 档位已保存。", { exact: true }).waitFor();
+  await settings.click();
+  assert.equal(await modelPicker.inputValue(), "browser-test-model");
+  await profile.getByLabel("设置档位").selectOption("strong");
+  await modelPicker.selectOption({ label: "自定义模型 ID…" });
+  await profile.getByLabel("自定义模型 ID", { exact: true }).fill("private-model");
+  await profile.getByRole("button", { name: "保存档位" }).click();
+  await routerPanel.getByText("Strong 档位已保存。", { exact: true }).waitFor();
+  await settings.click();
+  await profile.getByLabel("设置档位").selectOption("strong");
+  assert.equal(await modelPicker.inputValue(), "private-model");
+  await profile.getByRole("button", { name: "关闭" }).click();
+  await tier.selectOption("fast");
+  await routerPanel.getByText("browser-test-model", { exact: true }).waitFor();
+  await taskInput.fill("验证 Fast 档位");
+  await taskButton.click();
+  await routerPanel.locator(".router-result").getByText("browser-test-model", { exact: true }).waitFor();
+  await noOverflow(page);
+  await capture(page, "router-model-profiles");
+  const desktopViewport = page.viewportSize();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await noOverflow(page);
+  await page.setViewportSize(desktopViewport);
+  await routerPanel.getByRole("button", { name: "移除项目", exact: true }).click();
+  await removeProject.getByRole("button", { name: "确认移除" }).click();
+  await removeProject.getByRole("alert").getByText(/1 个未完成任务/).waitFor();
+  const profileJob = (await hub.claimRouter()).job;
+  assert.equal(profileJob.agent.id, "router-codex");
+  assert.equal(profileJob.agent.model, "browser-test-model");
+  assert.equal(profileJob.agent.effort, "low");
+  assert.equal(profileJob.rule.cwd, absoluteDirectory);
+  await hub.finish(profileJob, { outcome: "done" });
+  await removeProject.getByRole("button", { name: "确认移除" }).click();
+  await tierProject.waitFor({ state: "detached" });
+
   await navigate("Agent");
   await page.getByRole("heading", { name: "已配置 Agent" }).waitFor();
+  await page.getByRole("row", { name: /项目 Codex/ }).getByText("继承 Codex CLI 默认", { exact: true }).first().waitFor();
   assert.ok(await page.getByRole("row", { name: /巡检脚本.*离线/ }).count());
   await navigate("运行设置");
   await page.getByText("fixture-local", { exact: true }).waitFor();
@@ -312,5 +376,5 @@ try {
   await restored;
   await page.getByRole("heading", { name: "运行设置" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、项目添加和移除、AI 自动判断、直接创建任务及断线重试。");
+  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、项目添加和移除、AI 自动判断、直接创建任务、Fast 档位设置、领取及移除保护、断线重试。");
 } finally { await dispose(); }

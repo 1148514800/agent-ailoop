@@ -90,6 +90,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["group", isText, NOT_EMPTY, true],
     ["parallel", isCount, "要是正整数", true],
     ["maxActive", isCount, "要是正整数", true],
+    ["execution", isObject, "要是一个对象", true],
     ["resume", (value) => typeof value === "boolean", "只能是 true 或 false", true],
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
@@ -107,6 +108,14 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, `${where}的 when `, when, [["cron", isCron, "不是有效的 cron"]]);
   }
   if (!isObject(rule)) return;
+  if (rule.execution !== undefined) {
+    const inherited: Check = (value) => value === null || isText(value);
+    checkFields(issues, where + "的 execution", rule.execution, [
+      ["model", inherited, "要是非空文字或 null"],
+      ["effort", inherited, "要是非空文字或 null"],
+      ["pauseWith", (value) => isText(value) && value !== name, "要是另一条规则的名字", true],
+    ]);
+  }
   // A plain command needs no words: a script that polls something is an agent too.
   if (!rule.skill && !rule.prompt && rules.agents[rule.to]?.use !== "command") {
     issues.push(`${where}的 skill 和 prompt 至少写一个`);
