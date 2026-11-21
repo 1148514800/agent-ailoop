@@ -36,34 +36,24 @@ const CUSTOM_MODEL = "!custom";
 function ModelPicker({ initial, models, disabled }: { initial: string; models: string[] | null; disabled: boolean }) {
   const id = useId();
   const [choice, setChoice] = useState(initial);
-  const [search, setSearch] = useState("");
-  const query = search.trim().toLowerCase();
-  const filtered = models?.filter((id) => id === choice || id.toLowerCase().includes(query)) ?? [];
   const currentOutsideCatalog = choice && choice !== CUSTOM_MODEL && !models?.includes(choice);
 
   return <>
-    <div className={models?.length ? "router-model-picker" : undefined}>
-      <div className="field">
-        <label htmlFor={id}>模型 ID</label>
-        <select id={id} name={choice === CUSTOM_MODEL ? undefined : "model"} value={choice} disabled={disabled}
-          onChange={(event) => setChoice(event.target.value)}>
-          <option value="">继承 Codex CLI 默认</option>
-          {currentOutsideCatalog && <option value={choice}>{choice}（当前配置）</option>}
-          {filtered.map((id) => <option key={id} value={id}>{id}</option>)}
-          <option value={CUSTOM_MODEL}>自定义模型 ID…</option>
-        </select>
-      </div>
-      {!!models?.length && <label className="field">搜索模型
-        <input type="search" value={search} disabled={disabled} onChange={(event) => setSearch(event.target.value)}
-          onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} />
-      </label>}
+    <div className="field">
+      <label htmlFor={id}>模型 ID</label>
+      <select id={id} name={choice === CUSTOM_MODEL ? undefined : "model"} value={choice} disabled={disabled}
+        onChange={(event) => setChoice(event.target.value)}>
+        <option value="">继承 Codex CLI 默认</option>
+        {currentOutsideCatalog && <option value={choice}>{choice}（当前配置）</option>}
+        {models?.map((modelId) => <option key={modelId} value={modelId}>{modelId}</option>)}
+        <option value={CUSTOM_MODEL}>自定义模型 ID…</option>
+      </select>
     </div>
     {choice === CUSTOM_MODEL && <label className="field">自定义模型 ID
       <input name="model" defaultValue={initial} maxLength={128} autoComplete="off" required disabled={disabled} />
     </label>}
     <p className="muted" aria-live="polite">{models === null ? "正在读取本机 Codex 模型列表…" :
       models.length === 0 ? "本机暂无 Codex 模型列表，可选择自定义模型 ID。" :
-      query && !models.some((id) => id.toLowerCase().includes(query)) ? "未找到匹配的本机模型。" :
       "列表来自本机 Codex 缓存。"}</p>
   </>;
 }

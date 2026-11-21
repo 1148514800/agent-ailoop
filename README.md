@@ -130,7 +130,7 @@ AUTOLOOP_ROUTER_MODEL=你的模型名称
 「Agent」页显示已加载的模型、思考强度、配置来源和 Worker。未显式设置的 Codex 字段显示「继承 Codex CLI 默认」。控制台不读取 Worker 的 Codex 用户配置。Router 分类模型来自 `AUTOLOOP_ROUTER_MODEL`，它单独显示在 AI Router 面板。
 
 1. 在「运行总览 → AI Router」选择使用 Codex 的项目，打开「模型档位设置」。
-2. 选择 Fast 或 Strong，从模型 ID 下拉框选取本机 Codex 缓存中列出的模型，也可以搜索或选择「自定义模型 ID」。没有本机缓存时仍可手动填写。模型和思考强度都可以选择继承接单机器上的 Codex CLI 默认值。各模型支持的强度不同。
+2. 选择 Fast 或 Strong，从模型 ID 下拉框选取本机 Codex 缓存中列出的模型。也可以选择「自定义模型 ID」手动填写。模型和思考强度都可以选择继承接单机器上的 Codex CLI 默认值。各模型支持的强度不同。
 3. 提交任务时选择执行档位。「AI 自动判断」可以使用「自动选择」，模型在项目已配置的档位中选择，并另行判断是否先规划。未配置任何档位时自动使用默认配置。「直接创建任务」可手动选档位，仍然无需调用分类模型。
 
 Fast 和 Strong 是项目的执行档位。Agent 自身配置的模型、思考强度以及 Codex 的 `service_tier` 都照常保留。服务端为每次变更登记一个版本化的 `ai-profile-*` 规则，沿用原有 Agent、工作目录、执行权限与并发组。中台按这个版本生成给 Worker 的 `job.agent.model` 和 `job.agent.effort`，Codex 插件把它们传成命令行参数。保留旧版档位规则供已有 Run 的重试、审批续办和复查使用。手动变更了项目基础规则后，重新保存档位即可应用新的基础设置。

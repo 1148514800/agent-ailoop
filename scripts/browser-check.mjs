@@ -313,9 +313,7 @@ try {
   const profile = page.getByRole("dialog", { name: "模型档位设置" });
   const modelPicker = profile.getByLabel("模型 ID", { exact: true });
   assert.equal(await modelPicker.inputValue(), "");
-  const searchModel = profile.getByRole("searchbox", { name: "搜索模型" });
-  await searchModel.fill("browser");
-  assert.equal(await modelPicker.getByRole("option", { name: "other-test-model" }).count(), 0);
+  await modelPicker.getByRole("option", { name: "other-test-model" }).waitFor({ state: "attached" });
   await modelPicker.selectOption("browser-test-model");
   await profile.getByLabel("思考强度").selectOption("low");
   await profile.getByRole("button", { name: "保存档位" }).click();
