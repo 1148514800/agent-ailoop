@@ -29,6 +29,8 @@ function DshFields({ plan, plans, catalog, busy }: {
   const route = catalog.find(({ profile, id }) => profile + "/" + id === routeId);
   const [modelId, setModelId] = useState(source ? plan?.model ?? "" : "");
   const model = route?.models.find(({ id }) => id === modelId);
+  const problem = route?.reason ?? model?.reason ?? (route && modelId && !model ? "原模型已从 DSH 配置中移除。" :
+    sourceId && !route ? "原供应商配置已移除或无法读取。已保存的任务仍可使用原版本。" : undefined);
   const [protocol, setProtocol] = useState(plan?.provider?.api ?? "openai-completions");
   const [baseURL, setBaseURL] = useState(plan?.provider?.baseURL ?? "");
   const [effort, setEffort] = useState(plan?.effort ?? "");
@@ -47,23 +49,26 @@ function DshFields({ plan, plans, catalog, busy }: {
         <select name="dsh-existing" value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(""); setEffort(""); }} required disabled={busy}>
           <option value="">选择供应商</option>
           {sourceId && !catalog.some(({ profile, id }) => profile + "/" + id === sourceId) && <option value={sourceId} disabled>原供应商配置已不可用</option>}
-          {catalog.map(({ profile, id, api }) => <option key={profile + "/" + id} value={profile + "/" + id}>
-            {id} · {profile} · {apiLabels[api]}
+          {catalog.map(({ profile, id, api, reason }) => <option key={profile + "/" + id} value={profile + "/" + id}>
+            {profile} · {id} · {api ? apiLabels[api] : "未知协议"}{reason ? "（不兼容）" : ""}
           </option>)}
         </select>
       </label>
       <label className="field">模型 ID
-        <select name="model" aria-label="模型 ID" value={modelId} onChange={(event) => { setModelId(event.target.value); setEffort(""); }} required disabled={busy || !route}>
+        <select name="model" aria-label="模型 ID" value={modelId} onChange={(event) => { setModelId(event.target.value); setEffort(""); }} required disabled={busy || !route || !!route.reason}>
           <option value="">选择模型 ID</option>
-          {route?.models.map(({ id }) => <option key={id}>{id}</option>)}
+          {modelId && !model && <option value={modelId} disabled>{modelId}（已失效）</option>}
+          {route?.models.map(({ id, reason }, index) => <option key={id + ":" + index} value={id}>{id}{reason ? "（不兼容）" : ""}</option>)}
         </select>
       </label>
       <label className="field">思考强度
         <select name="effort" value={effort} onChange={(event) => setEffort(event.target.value)} disabled={busy}>
-          <option value="">由供应商决定</option>
+          <option value="">使用 DSH 默认设置</option>
+          {effort && !model?.efforts.some((level) => level === effort) && <option value={effort} disabled>{effort}（已失效）</option>}
           {model?.efforts.map((level) => <option key={level}>{level}</option>)}
         </select>
       </label>
+      {problem && <ErrorLine>{problem}</ErrorLine>}
     </>}
     {mode === "custom" && <>
       <label className="field">API 协议

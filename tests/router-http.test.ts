@@ -771,19 +771,39 @@ test("named plans bind each Run to the selected agent revision and reject unveri
 test("reused DSH providers isolate selected models, gateway credentials and queued versions", async () => {
   const oldHome = process.env.DSH_HOME;
   const dshHome = join(home, "fixture-dsh");
-  const folder = join(dshHome, "profiles", "desktop");
+  const folder = join(dshHome, "profiles", "web");
   process.env.DSH_HOME = dshHome;
   await mkdir(folder, { recursive: true });
   const secrets = ["fixture-native-key-a", "fixture-native-key-b"];
-  const patch = JSON.stringify([{ id: "llm-pi-ai", config: { providers: {
-    alfa: { api: "openai-completions", baseURL: "https://alfa.invalid", apiKeyEnv: "FIXTURE_A", models: [
-      { id: "model-one", reasoningEfforts: { low: "minimal", high: "high" } }, { id: "model-two" },
+  let patch = JSON.stringify([{ id: "llm-pi-ai", config: { providers: {
+    alfa: { api: "openai-completions", baseURL: "https://alfa.invalid", apiKeyEnv: "FIXTURE_A",
+      defaultInput: ["text"], defaultContextWindow: 32000, defaultMaxTokens: 4000,
+      compat: { supportsDeveloperRole: false, maxTokensField: "max_completion_tokens" }, models: [
+        { id: "model-one", input: ["text", "image"], contextWindow: 64000, maxTokens: 1200,
+          compat: { maxTokensField: "max_tokens" }, reasoningEfforts: { off: null, low: "minimal", high: "high" } },
+        { id: "model-two", reasoningEfforts: false },
     ] },
+    blocked: { api: "openai-completions", baseURL: "https://blocked.invalid", apiKeyEnv: "FIXTURE_A",
+      headers: { Authorization: "private-fixture-header" }, models: [{ id: "model-one" }] },
     beta: { api: "openai-completions", baseURL: "https://beta.invalid", apiKeyEnv: "FIXTURE_B",
       models: [{ id: "model-two", reasoningEfforts: { high: "max" } }] },
   } } }]);
   const patchFile = join(folder, "cordis.patch.yml");
   await writeFile(patchFile, patch);
+  const profiles = join(dshHome, "profiles");
+  const custom = join(profiles, "research_2026");
+  const corrupt = join(profiles, "broken");
+  const linkFile = join(profiles, "linked-file");
+  const outside = join(home, "external-dsh-profile");
+  await Promise.all([custom, corrupt, linkFile, outside].map((dir) => mkdir(dir)));
+  const customPatch = patch.replace("model-one", "custom-model");
+  await writeFile(join(custom, "cordis.patch.yml"), customPatch);
+  await writeFile(join(corrupt, "cordis.patch.yml"), "[invalid");
+  await writeFile(join(outside, "cordis.patch.yml"), customPatch);
+  if (process.platform !== "win32") {
+    await symlink(outside, join(profiles, "linked-directory"), "dir");
+    await symlink(join(outside, "cordis.patch.yml"), join(linkFile, "cordis.patch.yml"), "file");
+  }
   await writeFile(join(dshHome, ".credentials.yaml"), JSON.stringify({ version: 1, refs: { FIXTURE_A: secrets[0], FIXTURE_B: secrets[1] } }), { mode: 0o600 });
   const headers = { cookie, origin: base, "content-type": "application/json", "x-console-csrf": csrf };
   const send = async (path: string, body?: object) => {
@@ -794,31 +814,47 @@ test("reused DSH providers isolate selected models, gateway credentials and queu
   };
   try {
     const { result } = await send("plans");
-    assert.deepEqual(result.dshCatalog[0].models, [{ id: "model-one", efforts: ["low", "high"] }, { id: "model-two", efforts: [] }]);
-    assert.ok(!JSON.stringify(result.dshCatalog).includes("alfa.invalid"));
+    const catalog = result.dshCatalog;
+    assert.deepEqual([...new Set(catalog.map((entry: { profile: string }) => entry.profile))], ["research_2026", "web"]);
+    const alfa = catalog.find((entry: { profile: string; id: string }) => entry.profile === "web" && entry.id === "alfa");
+    assert.deepEqual(alfa.models, [{ id: "model-one", efforts: ["off", "low", "high"] }, { id: "model-two", efforts: [] }]);
+    assert.ok(JSON.stringify(catalog).includes("custom-model"));
+    for (const privateValue of ["alfa.invalid", "FIXTURE_A", "private-fixture-header", "Authorization", "max_completion_tokens"]) {
+      assert.ok(!JSON.stringify(catalog).includes(privateValue));
+    }
     const make = { id: "", name: "本机第一模型", agentId: "fixture-dsh", model: "model-one", effort: "low",
       tasks: ["research"], complexity: "any", projects: ["default"], enabled: true, priority: 100,
-      provider: { existing: { profile: "desktop", id: "alfa" } } };
+      provider: { existing: { profile: "web", id: "alfa" } } };
     assert.equal((await send("plans", { ...make, effort: "xhigh" })).status, 400);
+    assert.equal((await send("plans", { ...make, provider: { existing: { profile: "../external-dsh-profile", id: "alfa" } } })).status, 400);
+    const incompatible = await send("plans", { ...make, provider: { existing: { profile: "web", id: "blocked" } } });
+    assert.equal(incompatible.status, 409);
+    assert.match(incompatible.result.error, /自定义 HTTP 请求头/);
     const old = await send("plans", make);
     assert.equal(old.status, 200, old.result.error);
     const next = await send("plans", { ...make, name: "本机第二模型", model: "model-two", effort: "",
-      provider: { existing: { profile: "desktop", id: "alfa" } } });
+      provider: { existing: { profile: "web", id: "alfa" } } });
     assert.equal(next.status, 200, next.result.error);
     const run = (id: string) => send("task", { requestId: randomUUID(), projectId: "default", executionProfile: "plan:" + id,
       needsPlan: true, message: "读取测试数据", requirements: { type: "research", tools: [], complexity: "complex" } });
     const runs = [await run(old.result.id), await run(next.result.id)];
+    patch = patch.replace('"defaultContextWindow":32000', '"defaultContextWindow":48000');
+    await writeFile(patchFile, patch);
+    assert.equal((await send("plans", { ...make, id: old.result.id })).status, 200);
+    runs.push(await run(old.result.id));
     const switched = await send("plans", { ...make, id: old.result.id, model: "model-two", effort: "high",
-      provider: { existing: { profile: "desktop", id: "beta" } } });
+      provider: { existing: { profile: "web", id: "beta" } } });
     assert.equal(switched.status, 200, switched.result.error);
     runs.push(await run(old.result.id));
-    const expected = [["model-one", "low", "alfa", "minimal"], ["model-two", undefined, "alfa", undefined], ["model-two", "high", "beta", "max"]];
+    const expected = [["model-one", "low", "alfa", "minimal", 32000], ["model-two", undefined, "alfa", undefined, 32000],
+      ["model-one", "low", "alfa", "minimal", 48000], ["model-two", "high", "beta", "max", undefined]] as const;
     const worker = hubClient(hubUrl, JSON.parse(await readFile(join(home, "config.json"), "utf8")).worker.key);
     const refs = new Set();
+    let originalRef: string | undefined;
     for (const [i, response] of runs.entries()) {
       assert.equal(response.status, 200, response.result.error);
       const job = (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true, providers: true })).job;
-      const [model, effort, gateway, mapped] = expected[i]!;
+      const [model, effort, gateway, mapped, capacity] = expected[i]!;
       assert.equal(job.run, response.result.run.id);
       assert.deepEqual([job.agent.id, job.agent.model, job.agent.effort, job.rule.cwd], ["fixture-dsh", model, effort, home]);
       assert.ok(job.rule.prompt.includes(".plan") && job.rule.prompt.includes("context.json"));
@@ -826,13 +862,31 @@ test("reused DSH providers isolate selected models, gateway credentials and queu
       assert.ok(job.agent.providerRef);
       refs.add(job.agent.providerRef);
       const directory = join(home, "dsh-routes", job.agent.providerRef);
-      const imported = JSON.parse(await readFile(join(directory, "route.yml"), "utf8"))[1].config.providers["autoloop-gateway"];
+      const imported = JSON.parse(await readFile(join(directory, "route.yml"), "utf8"))[1].config.providers[gateway];
       assert.equal(imported.baseURL, "https://" + gateway + ".invalid");
+      assert.equal(imported.defaultContextWindow, capacity);
       assert.equal(imported.models[0].reasoningEfforts?.[effort!], mapped);
+      if (model === "model-one") {
+        assert.deepEqual(imported.compat, { supportsDeveloperRole: false, maxTokensField: "max_completion_tokens" });
+        assert.deepEqual(imported.models[0].compat, { maxTokensField: "max_tokens" });
+        assert.deepEqual(imported.models[0].input, ["text", "image"]);
+        assert.equal(imported.models[0].contextWindow, 64000);
+        assert.equal(imported.models[0].maxTokens, 1200);
+        assert.deepEqual(imported.models[0].reasoningEfforts, { off: null, low: "minimal", high: "high" });
+      }
+      if (i === 1) assert.equal(imported.models[0].reasoningEfforts, false);
       assert.ok((await readFile(join(directory, ".credentials.yaml"), "utf8")).includes(secrets[gateway === "alfa" ? 0 : 1]!));
-      await worker.result(job.run, job.token, { outcome: "done" });
+      if (i === 0) {
+        originalRef = job.agent.providerRef;
+        await worker.result(job.run, job.token, { outcome: "failed", error: "临时网关失败" });
+      } else await worker.result(job.run, job.token, { outcome: "done" });
     }
-    assert.equal(refs.size, 3);
+    assert.equal(refs.size, 4);
+    const retryTime = Date.parse(state().runs.find((item) => item.id === runs[0]!.result.run.id)!.notBefore) + 100;
+    const retry = hubRuntime.execute("claimNext", ["plans-worker", randomUUID(), true], retryTime);
+    assert.deepEqual([retry.run, retry.agent.model, retry.agent.effort, retry.agent.providerRef],
+      [runs[0]!.result.run.id, "model-one", "low", originalRef]);
+    hubRuntime.execute("finish", [retry.run, retry.token, { outcome: "done" }], retryTime + 1);
     assert.equal(await readFile(patchFile, "utf8"), patch);
   } finally {
     if (oldHome === undefined) delete process.env.DSH_HOME;

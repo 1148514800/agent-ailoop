@@ -152,7 +152,7 @@ export function planManagement(deps: {
         const imported = provider && typeof provider === "object" && Object.keys(provider).length === 1 && "existing" in provider
           ? await configuredDshRoute(provider.existing, model, effort) : undefined;
         route = await prepareDshProvider(imported?.settings ?? provider, model, effort, prior?.provider && prior.agentId === agentId
-          ? { provider: prior.provider, model: prior.model, effort: prior.effort } : undefined);
+          ? { provider: prior.provider, model: prior.model, effort: prior.effort } : undefined, imported?.imported);
         if (route.secret.length >= 8 && [plan.name, ...plan.projects].some((field) => field.includes(route!.secret))) {
           throw new RouterError(400, "方案名称和项目不能包含 API Key。");
         }
@@ -184,7 +184,7 @@ export function planManagement(deps: {
       const raw = encode(rawRules);
       const prepared = parseRouterRules(raw);
       const next = [...entries.filter((entry) => entry !== existing), { plan, variants, agentVersion, verified, proofVersion: 2 as const }];
-      if (route?.create) await writeDshProvider(route.provider, route.secret, model, effort);
+      if (route?.create) await writeDshProvider(route.provider, route.secret, model, effort, route.imported);
       const sidecar = planFile(file);
       const revision = rulesRevision(prepared);
       const additions = prepared.rules.filter((rule) => !rules.rules.some(({ name }) => name === rule.name)).map(({ name }) => name);

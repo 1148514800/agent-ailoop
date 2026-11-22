@@ -41,8 +41,8 @@ export type TaskRequirements = { type: TaskType; tools: ToolCapability[]; comple
 export type PlanChoice = `plan:${string}`;
 export const DSH_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
 export const DSH_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type DshProfileSource = { profile: "desktop" | "headless"; id: string };
-export type DshCatalogEntry = DshProfileSource & { api: typeof DSH_APIS[number]; models: { id: string; efforts: (typeof DSH_EFFORTS[number])[] }[] };
+export type DshProfileSource = { profile: string; id: string };
+export type DshCatalogEntry = DshProfileSource & { api?: typeof DSH_APIS[number]; reason?: string; models: { id: string; efforts: (typeof DSH_EFFORTS[number])[]; reason?: string }[] };
 export type DshProvider = {
   ref: string; api: typeof DSH_APIS[number]; baseURL: string; thinkingFormat: "default" | "deepseek"; effortValue: string; source?: DshProfileSource;
 };

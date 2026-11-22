@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DSH_APIS, DSH_EFFORTS, type DshProvider } from "../shared/router.ts";
+import type { ImportedDshModel } from "./dsh-import-schema.ts";
 import { dataHome } from "./router-rule-config.ts";
 import { RouterError } from "./router.ts";
 
@@ -11,7 +12,7 @@ const refPattern = /^[a-f0-9]{32}$/;
 const json = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
 const keyPattern = /^[\x21-\x7e]{1,2048}$/;
 
-function baseAddress(input: string) {
+export function baseAddress(input: string) {
   try {
     const url = new URL(input);
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
@@ -24,7 +25,7 @@ function baseAddress(input: string) {
 }
 
 export async function prepareDshProvider(
-  value: unknown, model: string, effort: string, previous?: { provider: DshProvider; model: string; effort: string },
+  value: unknown, model: string, effort: string, previous?: { provider: DshProvider; model: string; effort: string }, imported?: ImportedDshModel,
 ) {
   if (!value || typeof value !== "object" || Object.keys(value).length !== 5 || !model) {
     throw new RouterError(400, "请填写 DSH 自定义供应商和模型 ID。");
@@ -38,7 +39,8 @@ export async function prepareDshProvider(
       typeof effortValue !== "string" || (effortValue && (!effort || !/^[\w.-]{1,32}$/.test(effortValue)))) {
     throw new RouterError(400, "请核对 DSH 的 API 协议、推理选项和 API Key。");
   }
-  const details = { api: protocol, baseURL: baseAddress(baseURL.trim()), thinkingFormat, effortValue } satisfies Omit<DshProvider, "ref">;
+  const address = baseAddress(baseURL.trim());
+  const details = { api: protocol, baseURL: imported ? baseURL : address, thinkingFormat, effortValue } satisfies Omit<DshProvider, "ref">;
   const prior = previous?.provider;
   const sameGateway = prior && prior.api === details.api && prior.baseURL === details.baseURL;
   const saved = sameGateway && refPattern.test(prior.ref)
@@ -49,35 +51,45 @@ export async function prepareDshProvider(
   if (!key && !sameGateway) throw new RouterError(400, "新增或更换供应商地址或协议时，请重新填写 API Key。");
   const secret = key || saved;
   if (!secret) throw new RouterError(409, "未找到这个 DSH 供应商的本机 API Key，请重新填写。");
-  if (secret.length >= 8 && [details.baseURL, model, effortValue].some((field) => field.includes(secret))) {
+  if (secret.length >= 8 && [details.baseURL, model, effortValue, JSON.stringify(imported) ?? ""].some((field) => field.includes(secret))) {
     throw new RouterError(400, "供应商地址、模型和推理强度字段不能包含 API Key。");
   }
   if (saved === secret && sameGateway && previous.model === model && previous.effort === effort &&
-      prior.thinkingFormat === thinkingFormat && prior.effortValue === effortValue) {
-    return { provider: prior, secret };
+      prior.thinkingFormat === thinkingFormat && prior.effortValue === effortValue && !!prior.source === !!imported) {
+    const snapshot = await readFile(join(store(), prior.ref, "route.yml"), "utf8").catch(() => undefined);
+    if (snapshot === providerPatch(prior, model, effort, imported)) return { provider: prior, secret };
   }
-  return { provider: { ref: randomUUID().replaceAll("-", ""), ...details }, secret, create: true as const };
+  return { provider: { ref: randomUUID().replaceAll("-", ""), ...details }, secret, imported, create: true as const };
 }
 
-export async function writeDshProvider(provider: DshProvider, secret: string, model: string, effort: string) {
+function providerPatch(provider: DshProvider, model: string, effort: string, imported?: ImportedDshModel) {
+  // DSH requires at least one enabled level even when the selected level is off.
+  const reasoningEfforts = effort === "off" ? { off: provider.effortValue || null, high: "high" }
+    : effort ? { [effort]: provider.effortValue || effort } : undefined;
+  const configuration = imported?.provider ?? (effort ? { reasoning: effort } : {});
+  const fields = imported?.model ?? {
+    reasoningEfforts, ...(provider.thinkingFormat === "deepseek" && { compat: { thinkingFormat: "deepseek" } }),
+  };
+  const route = {
+    api: provider.api, apiKeyEnv: keyName, baseURL: provider.baseURL, ...configuration, models: [{ id: model, ...fields }],
+  };
+  const id = imported?.id ?? "autoloop-gateway";
+  return json([
+    { id: "credentials", name: "@deepseek-ai/dsh-credentials-local", disabled: false,
+      config: { path: join(store(), provider.ref, ".credentials.yaml") } },
+    { id: "llm-pi-ai", config: { providers: { [id]: route } } },
+    { id: "agent-default-model", config: { provider: id, model, ...(effort && { reasoningEffort: effort }) } },
+  ]);
+}
+
+export async function writeDshProvider(provider: DshProvider, secret: string, model: string, effort: string, imported?: ImportedDshModel) {
   const directory = join(store(), provider.ref);
   await mkdir(store(), { recursive: true, mode: 0o700 });
   await mkdir(directory, { mode: 0o700 });
   try {
     const credentials = join(directory, ".credentials.yaml");
     await writeFile(credentials, json({ version: 1, refs: { [keyName]: secret } }), { flag: "wx", mode: 0o600 });
-    // DSH requires at least one enabled level even when the selected level is off.
-    const reasoningEfforts = effort === "off" ? { off: provider.effortValue || null, high: "high" }
-      : effort ? { [effort]: provider.effortValue || effort } : undefined;
-    const route = {
-      api: provider.api, apiKeyEnv: keyName, baseURL: provider.baseURL, ...(effort && { reasoning: effort }),
-      models: [{ id: model, reasoningEfforts, ...(provider.thinkingFormat === "deepseek" && { compat: { thinkingFormat: "deepseek" } }) }],
-    };
-    await writeFile(join(directory, "route.yml"), json([
-      { id: "credentials", name: "@deepseek-ai/dsh-credentials-local", disabled: false, config: { path: credentials } },
-      { id: "llm-pi-ai", config: { providers: { "autoloop-gateway": route } } },
-      { id: "agent-default-model", config: { provider: "autoloop-gateway", model, ...(effort && { reasoningEffort: effort }) } },
-    ]), { flag: "wx", mode: 0o600 });
+    await writeFile(join(directory, "route.yml"), providerPatch(provider, model, effort, imported), { flag: "wx", mode: 0o600 });
   } catch {
     await removeUnpublishedDshProvider(provider);
     throw new RouterError(503, "无法保存本机 DSH 供应商配置。");

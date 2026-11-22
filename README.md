@@ -141,7 +141,9 @@ Fast 和 Strong 是项目的执行档位。Agent 自身配置的模型、思考�
 
 在「运行总览 → AI Router → 执行方案」可创建、编辑和禁用方案。每个方案绑定一个 Agent，并指定授权项目、适用任务类型、复杂度偏好和优先级。Codex 和 Claude Code 可配置模型与思考强度。DSH 方案可使用 DSH 内部默认配置、复用已配置的本机供应商，或使用独立自定义供应商。Fast / Strong 仍可直接选择。
 
-选择「复用 DSH 已配置的供应商」，可从本机 `desktop` 或 `headless` profile 的自定义供应商中选择模型。推理级别来自该模型在 DSH 中申明的配置，也可以留空交给供应商决定。控制台服务端保存该轮次版本所需的网关、模型和凭据副本，DSH 全局设置无需修改。同一个 DSH Agent 可以绑定多个方案，每个方案独立选择供应商、模型和推理级别。依赖额外认证、请求头或特殊网关参数的配置请单独核对兼容性。 [DSH 供应商文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.zh.md)
+选择「复用 DSH 已配置的供应商」，即可浏览当前 `DSH_HOME/profiles/` 下的 `headless`、`desktop`、`web` 和已有的自定义 Profile。列表显示显式声明的模型与推理档位。留空思考强度时使用 DSH 默认设置。控制台保留供应商默认容量、模型容量、输出上限、输入模态和受支持的请求兼容参数。模型设置优先于供应商默认值。修改导入配置后重新保存，控制台会为新轮次保存独立版本。 [DSH 供应商文档](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/docs/user/guide/providers.zh.md)
+
+自定义 HTTP 请求头、替代凭据存储、特殊认证、依赖内置目录的 `modelOverrides`、请求模板和其他未验证的扩展会显示为不兼容。损坏或经过符号链接的 Profile 会跳过。旧方案仍可从原版本运行。
 
 使用第三方 DSH 供应商的方案需绑定本机 Worker。选择网关的 API 协议、填写 Base URL（例如 `https://gateway.example/v1`）和 API Key，再选现有模型 ID 或手动添加。可选思考强度和网关要求的 API 强度值。DeepSeek 兼容网关可以选择 DeepSeek thinking。首次使用此功能前需要运行新版 Hub 和 Worker。
 

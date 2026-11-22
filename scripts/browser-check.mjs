@@ -23,12 +23,19 @@ await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({
 const screenshots = process.env.AUTOLOOP_TEST_SCREENSHOTS || join(import.meta.dirname, "../docs/screenshots");
 const shot = process.argv.includes("--screenshots");
 const dshHome = join(sandbox, "dsh");
-const dshProfile = join(dshHome, "profiles", "desktop");
+const dshProfile = join(dshHome, "profiles", "research_web");
 await mkdir(dshProfile, { recursive: true });
 await writeFile(join(dshProfile, "cordis.patch.yml"), JSON.stringify([{ id: "llm-pi-ai", config: { providers: {
   demo: { api: "openai-completions", baseURL: "https://example.invalid", apiKeyEnv: "DSH_DEMO_KEY", models: [
     { id: "demo-research", reasoningEfforts: { high: "max" } }, { id: "demo-fast" },
   ] },
+  restricted: { api: "openai-completions", baseURL: "https://example.invalid", apiKeyEnv: "DSH_DEMO_KEY",
+    headers: { Authorization: "browser-private-fixture" }, models: [{ id: "restricted-model" }] },
+} } }]));
+const webProfile = join(dshHome, "profiles", "web");
+await mkdir(webProfile);
+await writeFile(join(webProfile, "cordis.patch.yml"), JSON.stringify([{ id: "llm-pi-ai", config: { providers: {
+  browser: { api: "openai-completions", baseURL: "https://example.invalid", apiKeyEnv: "DSH_DEMO_KEY", models: [{ id: "web-model" }] },
 } } }]));
 await writeFile(join(dshHome, ".credentials.yaml"), JSON.stringify({ version: 1, refs: { DSH_DEMO_KEY: "browser-fixture-secret" } }), { mode: 0o600 });
 let hub, server, browser, model, probeServer;
@@ -373,7 +380,14 @@ try {
   await plans.getByLabel("方案名称").fill("本机研究模型");
   await plans.getByLabel("绑定 Agent").selectOption("dsh");
   await plans.getByLabel("DSH 供应商").selectOption("existing");
-  await plans.getByLabel("本机供应商").selectOption("desktop/demo");
+  const supplier = plans.getByLabel("本机供应商");
+  await supplier.selectOption("web/browser");
+  await plans.getByLabel("模型 ID", { exact: true }).getByRole("option", { name: "web-model" }).waitFor({ state: "attached" });
+  await supplier.selectOption("research_web/restricted");
+  await plans.getByText("供应商使用了自定义 HTTP 请求头，无法安全复用。").waitFor();
+  assert.equal(await plans.getByLabel("模型 ID", { exact: true }).isDisabled(), true);
+  assert.equal(await plans.getByText("browser-private-fixture").count(), 0);
+  await supplier.selectOption("research_web/demo");
   await plans.getByLabel("模型 ID", { exact: true }).selectOption("demo-fast");
   assert.equal(await plans.getByLabel("思考强度").locator("option").count(), 1);
   await plans.getByLabel("模型 ID", { exact: true }).selectOption("demo-research");
@@ -383,6 +397,10 @@ try {
   await plans.getByRole("checkbox", { name: /game-box/ }).first().check();
   await plans.getByRole("button", { name: "保存方案" }).click();
   await plans.getByText("执行方案已保存。").waitFor();
+  await plans.getByRole("button", { name: "关闭" }).click();
+  await routerPanel.getByRole("button", { name: "执行方案", exact: true }).click();
+  await plans.getByLabel("选择方案").selectOption({ label: "本机研究模型" });
+  assert.equal(await plans.getByLabel("本机供应商").inputValue(), "research_web/demo");
   assert.equal(await plans.getByLabel("模型 ID", { exact: true }).inputValue(), "demo-research");
   assert.equal(await plans.getByLabel("思考强度").inputValue(), "high");
   await noOverflow(page);
