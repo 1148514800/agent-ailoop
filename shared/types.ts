@@ -37,3 +37,9 @@ export type FactRow = Record<string, unknown>;
 export type Change = { table: string; key: string; row: FactRow | null };
 export type Fact = { seq: number; at: number | string; type: string; changes: Change[] };
 export type Health = { ok: boolean; commit: string };
+
+export type FeishuChatStatus = {
+  entry: "disabled" | "setup" | "connecting" | "listening" | "reconnecting";
+  receive: "unverified" | "verified" | "missing";
+  error: string | null;
+};

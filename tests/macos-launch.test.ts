@@ -37,7 +37,7 @@ async function setup(t: TestContext, configured = true) {
   const hubBin = join(workspace, "agent-autoloop", "bin");
   const modules = join(workspace, "node_modules");
   await Promise.all([bin, hubHome, join(workspace, "scripts"), hubBin, modules].map((path) => mkdir(path, { recursive: true })));
-  for (const part of ["启动控制台.command", "关闭控制台.command", "package-lock.json", "scripts/macos-command.sh", "scripts/macos-services.ts", "scripts/start-macos.ts", "scripts/stop-macos.ts", "scripts/hub.ts", "server", "shared", "agent-autoloop/kernel", "agent-autoloop/protocol"]) {
+  for (const part of ["启动控制台.command", "关闭控制台.command", "package-lock.json", "scripts/macos-command.sh", "scripts/macos-services.ts", "scripts/start-macos.ts", "scripts/stop-macos.ts", "scripts/hub.ts", "server", "shared", "agent-autoloop/kernel", "agent-autoloop/protocol", "agent-autoloop/host/command.ts"]) {
     await cp(join(root, part), join(workspace, part), { recursive: true });
   }
   await cp(join(root, "node_modules", "yaml"), join(modules, "yaml"), { recursive: true });

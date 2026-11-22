@@ -427,6 +427,9 @@ try {
   await page.getByRole("row", { name: /项目 Codex/ }).getByText("继承 Codex CLI 默认", { exact: true }).first().waitFor();
   assert.ok(await page.getByRole("row", { name: /巡检脚本.*离线/ }).count());
   await navigate("运行设置");
+  const feishuPanel = page.locator("section").filter({ has: page.getByRole("heading", { name: "飞书", exact: true }) });
+  await feishuPanel.getByText("未启用", { exact: true }).waitFor();
+  await feishuPanel.getByText("待配置", { exact: true }).waitFor();
   await page.getByText("fixture-local", { exact: true }).waitFor();
   const dismiss = page.getByRole("button", { name: "关闭提示" });
   if (await dismiss.isVisible()) await dismiss.click();

@@ -47,7 +47,7 @@ const model = createServer(async (req, res) => {
   const [system, { content: message }] = JSON.parse(raw).messages;
   const useProfiles = system.content.includes("允许的执行档位：fast");
   const profile = message.includes("无权档位") ? "arbitrary-model" : message.includes("重构") ? "strong" : "fast";
-  const named = message.startsWith("方案测试");
+  const named = message.startsWith("方案测试") || message.startsWith("飞书测试");
   const requirements = message.includes("研究") ? { type: "research", tools: [], complexity: "complex" }
     : message.includes("浏览器") ? { type: "operation", tools: ["browser_use"], complexity: "simple" }
       : { type: "coding", tools: [], complexity: "simple" };
@@ -101,6 +101,9 @@ test("missing session, invalid CSRF and foreign origins never reach the model", 
   assert.equal((await post("你好", randomUUID(), { cookie })).status, 403);
   assert.equal((await post("你好", randomUUID(), { cookie, "x-console-csrf": csrf, origin: "https://another.invalid" })).status, 403);
   assert.equal(modelCalls, 0);
+  assert.equal((await fetch(base + "/api/feishu/status")).status, 401);
+  assert.deepEqual(await fetch(base + "/api/feishu/status", { headers: { cookie } }).then((response) => response.json()),
+    { entry: "disabled", receive: "unverified", error: null });
 });
 
 test("model options expose only distinct visible model IDs from the local Codex cache", async () => {
@@ -932,4 +935,169 @@ test("a stale owner and Hub confirmation timeout leave a recoverable, runnable p
   const result = await response.json();
   assert.equal(response.status, 200, result.error);
   assert.equal(result.execution.model, body.model);
+});
+
+
+test("Feishu private messages route once, resume delivery after restart and follow approvals in the Hub", { timeout: 35000, skip: process.platform === "win32" }, async () => {
+  const { setTimeout: delay } = await import("node:timers/promises");
+  const { appendFile } = await import("node:fs/promises");
+  const { createFeishuChat } = await import("../server/feishu-chat.ts");
+  const folder = join(home, "feishu-fixture");
+  await mkdir(folder);
+  const input = join(folder, "events.ndjson"), output = join(folder, "outbox.ndjson");
+  const restartMarker = join(folder, "restart");
+  const starts = join(folder, "starts");
+  await Promise.all([input, output, starts].map((file) => writeFile(file, "")));
+  const program = join(folder, "lark-cli");
+  await writeFile(program, "#!/bin/sh\nexec " + JSON.stringify(process.execPath) + " " + JSON.stringify(join(folder, "cli.mjs")) + ' "$@"\n', { mode: 0o700 });
+  await writeFile(join(folder, "cli.mjs"), `
+    import * as fs from "node:fs";
+    const a = process.argv.slice(2);
+    const inbox = ${JSON.stringify(input)}, out = ${JSON.stringify(output)}, restart = ${JSON.stringify(restartMarker)};
+    if (a.join(" ") === "event consume im.message.receive_v1 --as bot") {
+      fs.appendFileSync(${JSON.stringify(starts)}, "start\\n");
+      process.stderr.write("[event] ready event_key=im.message.receive_v1\\n");
+      let offset = 0;
+      process.stdin.resume();
+      const timer = setInterval(() => {
+        if (fs.existsSync(restart)) { fs.unlinkSync(restart); process.exit(4); }
+        const text = fs.readFileSync(inbox, "utf8");
+        if (text.length > offset) { process.stdout.write(text.slice(offset)); offset = text.length; }
+      }, 25);
+      process.stdin.once("end", () => clearInterval(timer));
+    } else if (a[0] === "im" && a[1] === "+messages-reply" && a.includes("--as") && a.includes("--text") && a.at(-1) === "-") {
+      const text = fs.readFileSync(0, "utf8"), id = a[a.indexOf("--message-id")+1], key = a[a.indexOf("--idempotency-key")+1];
+      if (id === "om_changes" && text.includes("已完成") && !fs.existsSync(out + ".fail")) {
+        fs.writeFileSync(out + ".fail", key);
+        process.exit(4);
+      }
+      fs.appendFileSync(out, JSON.stringify({ id, key, text }) + "\\n");
+      process.stdout.write(JSON.stringify({ok:true,data:{message_id:"om_reply"}}));
+    } else process.exit(2);
+  `);
+  const workerKey = hubRuntime.addKey("worker", "feishu-worker");
+  const cardKey = hubRuntime.addKey("channel", "feishu");
+  const disk = process.env.AGENT_AUTOLOOP_RULES!;
+  const hubConfig = JSON.parse(await readFile(disk, "utf8"));
+  hubConfig.channels.feishu = { name: "飞书", answerers: ["ou_allowed"] };
+  hubConfig.agents["feishu-codex"] = { use: "codex", name: "Codex", worker: "feishu-worker" };
+  hubConfig.agents["feishu-dsh"] = { use: "dsh", name: "DSH", worker: "feishu-worker", access: "read" };
+  hubConfig.rules.push({ ...rule, name: "ai-project-feishu", cwd: folder, to: "feishu-codex", when: { source: "workstation", types: ["router.project.feishu.*"] }, channels: ["feishu"] });
+  await writeFile(disk, JSON.stringify(hubConfig));
+  assert.deepEqual(hubRuntime.reloadRules(), {});
+  await writeFile(join(home, "config.json"), JSON.stringify({ url: hubUrl, owner, source: { name: "workstation", key: source },
+    worker: { name: "feishu-worker", key: workerKey }, channels: { feishu: { key: cardKey, user: "ou_allowed" } } }));
+  const router = createRouter(options);
+  for (const [agentId, name, model, tasks] of [
+    ["feishu-codex", "飞书编程", "fixture-codex", ["coding"]],
+    ["feishu-dsh", "飞书研究", "", ["research"]],
+  ]) {
+    await router.changePlan({ id: "", agentId, name, model, effort: "", tasks, complexity: "any", projects: ["feishu"], enabled: true, priority: 51 },
+      new AbortController().signal);
+  }
+  await writeFile(join(home, "feishu-chat.json"), JSON.stringify({ enabled: true, program, maxConcurrent: 4,
+    users: { ou_allowed: { projects: ["feishu"] }, ou_chat_only: { projects: [] } } }), { mode: 0o600 });
+  const send = (id: string, text: string, fields: object = {}) => appendFile(input, JSON.stringify({
+    type: "im.message.receive_v1", chat_type: "p2p", message_type: "text", sender_type: "user", sender_id: "ou_allowed",
+    chat_id: "oc_private", message_id: id, content: text, ...fields,
+  }) + "\n");
+  const replies = async () => (await readFile(output, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { id: string; text: string; key: string });
+  async function until<T>(read: () => Promise<T | undefined>) {
+    for (let i = 0; i < 160; i++) {
+      const result = await read();
+      if (result !== undefined) return result;
+      await delay(50);
+    }
+    assert.fail("timed out waiting for Feishu fixture");
+  }
+  const receipt = (id: string, text: string) => until(async () => (await replies()).find((item) => item.id === id && item.text.includes(text)));
+  const worker = hubClient(hubUrl, workerKey), channel = hubClient(hubUrl, cardKey);
+  const claim = async () => (await worker.work({ claim: randomUUID(), wait: 0, running: [], capacity: true })).job;
+  const start = () => {
+    const chat = createFeishuChat({ home, router: createRouter(options), loadHub, pollMs: 40, reconnectMs: 40 });
+    chat.start();
+    return chat;
+  };
+  let chat = start();
+  try {
+    const prior = modelCalls;
+    await send("om_group", "飞书测试修改", { chat_type: "group" });
+    await send("om_forward", "飞书测试修改", { message_type: "merge_forward" });
+    await send("om_bot", "飞书测试修改", { sender_type: "bot" });
+    await send("om_other", "飞书测试修改", { sender_id: "ou_unlisted" });
+    await send("om_hi", "你好");
+    await receipt("om_hi", "你好，有什么可以帮你？");
+    assert.equal(chat.status().receive, "verified");
+    await send("om_hi", "你好");
+    await send("om_list", "/projects");
+    assert.match((await receipt("om_list", "feishu")).text, /^当前可用项目\nfeishu$/);
+    assert.equal(modelCalls, prior + 1);
+    await send("om_denied", "/use default");
+    await receipt("om_denied", "未授权");
+    await send("om_no_project", "飞书测试修改", { sender_id: "ou_chat_only" });
+    await receipt("om_no_project", "未选择可执行的授权项目");
+    assert.equal(await claim(), null);
+    await send("om_choose", "/use feishu");
+    await receipt("om_choose", "已切换");
+    await send("om_browser", "飞书测试打开浏览器");
+    await receipt("om_browser", "已验证");
+    assert.equal(await claim(), null);
+
+    await send("om_changes", "飞书测试修改 README");
+    const accepted = await receipt("om_changes", "任务已创建");
+    const simple = await claim();
+    assert.ok(accepted.text.includes("Run #" + simple.run) && accepted.text.includes("飞书编程"));
+    assert.equal(simple.agent.id, "feishu-codex");
+    assert.ok(simple.context.events[0].type.endsWith(".direct"));
+    await send("om_changes", "飞书测试修改 README");
+    await send("om_research", "飞书测试重构并研究");
+    await receipt("om_research", "飞书研究");
+    const beforeReconnect = modelCalls;
+    await writeFile(restartMarker, "");
+    await until(async () => (await readFile(starts, "utf8")).trim().split("\n").length >= 2 ? true : undefined);
+    assert.equal(modelCalls, beforeReconnect);
+    await chat.close();
+    chat = start();
+    await send("om_current", "/current");
+    await receipt("om_current", "当前项目 feishu");
+    await worker.result(simple.run, simple.token, { outcome: "done", summary: "修复完成 " + owner + " /Users/alice/private.txt" });
+    const research = await claim();
+    assert.equal(research.agent.id, "feishu-dsh");
+    assert.ok(research.context.events[0].type.endsWith(".plan"));
+    await worker.result(research.run, research.token, { outcome: "failed", error: "Bearer test-private-token" });
+    await receipt("om_research", "等待中台重试");
+    const completed = await receipt("om_changes", "已完成");
+    assert.ok(!completed.text.includes(owner) && !completed.text.includes("/Users"));
+    assert.equal(completed.key, await readFile(output + ".fail", "utf8"));
+    assert.equal((await replies()).filter(({id}) => id === "om_changes").length, 2);
+    assert.equal(modelCalls, beforeReconnect);
+
+    let exhausted;
+    for (let attempt = 1; attempt < 10; attempt++) {
+      const deferred = state().runs.find((run) => run.id === research.run)!;
+      const retryTime = Date.parse(deferred.notBefore!) + 100;
+      const retried = hubRuntime.execute("claimNext", ["feishu-worker", randomUUID()], retryTime);
+      assert.equal(retried.run, research.run);
+      hubRuntime.execute("finish", [retried.run, retried.token, { outcome: "failed", error: "临时失败" }], retryTime + 1);
+      exhausted = retried.run;
+    }
+    assert.equal(exhausted, research.run);
+    await receipt("om_research", "已停止自动重试");
+    assert.ok(!(await replies()).filter(({ id }) => id === "om_research").some(({ text }) => text.includes("已完成")));
+
+    await send("om_ask", "飞书测试需审批的修改");
+    await receipt("om_ask", "任务已创建");
+    const asked = await claim();
+    await worker.result(asked.run, asked.token, { outcome: "done", ask: [{ key: "approval", title: "允许修改？", text: "请核对", options: ["继续", "停止"] }] });
+    await receipt("om_ask", "等待审批");
+    const card = state().cards.find((item) => item.title === "允许修改？");
+    assert.ok(card);
+    await channel.delivered(card.id, card.version, "om_real_card");
+    await assert.rejects(channel.answer(card.id, { choice: 0, by: "ou_unlisted", ref: "om_real_card" }));
+    await channel.answer(card.id, { text: "允许这一次", by: "ou_allowed", ref: "om_real_card" });
+    const resumed = await claim();
+    assert.ok(resumed.context.events[0].type === "card.answered");
+    await worker.result(resumed.run, resumed.token, { outcome: "done", summary: "审批后执行完成" });
+    await receipt("om_ask", "审批后执行完成");
+  } finally { await chat.close(); }
 });

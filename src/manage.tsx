@@ -1,7 +1,7 @@
 import { LocalAgents } from "./local-agents.tsx";
 import { useEffect, useState } from "react";
 import { Activity, Bot, CalendarClock, Clock3, GitFork, History, Link2, ListTodo, Pause as PauseIcon, Play, Radio, RotateCcw, Server, Settings2, ShieldCheck, Workflow } from "lucide-react";
-import type { Pause, Rule, State } from "../shared/types.ts";
+import type { FeishuChatStatus, Pause, Rule, State } from "../shared/types.ts";
 import type { ExecutionConfig } from "../shared/router.ts";
 import { agentName, amount, api, fmtDate, rulePath } from "./data.ts";
 import { configSource, configValue } from "./router-models.tsx";
@@ -156,6 +156,17 @@ export function Agents({ state, act }: { state: State; act: Act }) {
 
 export function Settings({ live }: { live: Live }) {
   const { state, online, health, stream, lastError } = live;
+  const [feishu, setFeishu] = useState<FeishuChatStatus | null>(null);
+  useEffect(() => {
+    const stop = new AbortController();
+    const refresh = () => void api<FeishuChatStatus>("/feishu/status", { signal: stop.signal })
+      .then(setFeishu).catch(() => { if (!stop.signal.aborted) setFeishu(null); });
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => { stop.abort(); window.clearInterval(timer); };
+  }, []);
+  const approval = state?.channels.find((channel) => channel.id === "feishu");
+  const entry = { disabled: "未启用", setup: "待配置", connecting: "正在连接", listening: "正在监听", reconnecting: "正在重连" };
   const tz = state?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   return <>
     <Heading title="运行设置" description="查看本机连接、运行版本和配置摘要。" />
@@ -177,6 +188,14 @@ export function Settings({ live }: { live: Live }) {
           <li><span className="mini-icon tone-blue"><Bot size={17} /></span><div><strong>Agent</strong><small>{state.agents.map((agent) => agent.name).join("、") || "暂无"}</small></div><TextLink to="#agents">{state.agents.length} 个</TextLink></li>
           <li><span className="mini-icon tone-violet"><ListTodo size={17} /></span><div><strong>中台规则</strong><small>{state.lines.map((rule) => rule.name).join("、") || "暂无"}</small></div><TextLink to="#rules">{state.lines.length} 条</TextLink></li>
         </ul> : <Empty title="等待中台配置快照" icon={Activity} />}
+      </Panel>
+      <Panel title="飞书" icon={Radio} className="settings-panel">
+        <Details items={[
+          ["审批通道", approval ? (approval.online ? "在线" : "离线") : state ? "待配置" : "待检查"],
+          ["聊天入口", feishu ? entry[feishu.entry] : "待检查"],
+          ["接收授权", feishu?.receive === "verified" ? "已收到授权私聊" : feishu?.receive === "missing" ? "授权缺失" : "待配置或验证"],
+          ["最近错误", feishu?.error ?? "暂无"],
+        ]} />
       </Panel>
       <Panel title="已配置通道" icon={Link2} className="settings-panel">
         {state?.channels.length ? <ul className="summary-list">{state.channels.map((channel) => <li key={channel.id}>

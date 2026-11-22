@@ -3,6 +3,8 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createFeishuChat } from "./feishu-chat.ts";
+import { dataHome } from "./router-rule-config.ts";
 import { loadHub } from "./hub.ts";
 import { createConsole } from "./proxy.ts";
 import { createRouter } from "./router-dispatch.ts";
@@ -50,11 +52,21 @@ if (!/^\d+$/.test(portText) || !Number.isInteger(port) || port > 65535) {
   process.exit(1);
 }
 const router = createRouter({ config: () => localRouterConfig(root), modelKey: () => localRouterKey(root), loadHub });
-const server = createConsole({ loadHub, router, frontend: serve });
+const feishu = createFeishuChat({ home: dataHome(), router, loadHub, modelKey: () => localRouterKey(root) });
+const server = createConsole({ loadHub, router, frontend: serve, feishuStatus: feishu.status });
 server.on("error", (error: NodeJS.ErrnoException) => {
   console.error(error.code === "EADDRINUSE" ? "端口已占用，请指定其他 AUTOLOOP_CONSOLE_PORT。" : "无法启动本地控制台。");
   process.exit(1);
 });
 server.listen(port, "127.0.0.1", () => {
+  feishu.start();
   console.log("本地控制台 http://127.0.0.1:" + (server.address() as AddressInfo).port);
 });
+
+function close() {
+  server.close();
+  server.closeAllConnections();
+  void feishu.close();
+}
+process.once("SIGINT", close);
+process.once("SIGTERM", close);

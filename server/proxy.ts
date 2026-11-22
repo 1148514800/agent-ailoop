@@ -1,3 +1,4 @@
+import type { FeishuChatStatus } from "../shared/types.ts";
 import { serveBrowserCheck } from "./browser-proof.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -126,6 +127,7 @@ async function pipeFacts(upstream: Response, res: ServerResponse, signal: AbortS
 export function createConsole(options: {
   loadHub(): Promise<Hub>; router?: RouterHandler;
   pickFolder?: typeof pickProjectFolder;
+  feishuStatus?: () => FeishuChatStatus;
   frontend?(req: IncomingMessage, res: ServerResponse): void | Promise<void>;
 }) {
   const sessions = new Map<string, Session>();
@@ -174,6 +176,9 @@ export function createConsole(options: {
       if (req.method === "POST") {
         const csrf = req.headers["x-console-csrf"];
         if (typeof csrf !== "string" || !equal(csrf, session.csrf)) throw new RequestError(403, "页面验证已失效，请刷新后重试。");
+      }
+      if (req.method === "GET" && url.pathname === "/api/feishu/status" && !url.search) {
+        return json(res, 200, options.feishuStatus?.() ?? { entry: "disabled", receive: "unverified", error: null });
       }
       if (req.method === "POST" && url.pathname === "/api/router/projects/pick-folder" && !url.search) {
         if (req.socket.remoteAddress !== "127.0.0.1" && req.socket.remoteAddress !== "::ffff:127.0.0.1") {

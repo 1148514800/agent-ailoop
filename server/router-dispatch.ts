@@ -196,7 +196,7 @@ export function createRouter(options: {
     })) };
   }
 
-  async function submit(body: Record<string, unknown>, signal: AbortSignal, mode: RouterMode = "auto", probe?: { summary: string }) {
+  async function submit(body: Record<string, unknown>, signal: AbortSignal, mode: RouterMode = "auto", probe?: { summary: string }, remote?: { authorize(): Promise<void> }) {
     const { requestId, message, needsPlan } = body;
     const choice = body.executionProfile === undefined ? "default" : body.executionProfile;
     const projectId = body.projectId === undefined && mode === "auto" ? "default" : body.projectId;
@@ -251,8 +251,8 @@ export function createRouter(options: {
         })
         : [];
       const offered = new Map(available);
-      const structured = !saved && mode === "auto" && (await readPlans()).entries.some(({ plan }) =>
-        plan.enabled && plan.projects.includes(projectId));
+      const structured = !saved && mode === "auto" && (!!remote || (await readPlans()).entries.some(({ plan }) =>
+        plan.enabled && plan.projects.includes(projectId)));
       let planning = saved?.needsPlan;
       let requirements = saved?.requirements ?? declared;
       let profile: ExecutionProfile = saved?.profile ?? (isModelProfile(choice) || isPlanChoice(choice) ? choice : "default");
@@ -287,6 +287,7 @@ export function createRouter(options: {
             !requirements.tools.includes("desktop_use")) requirements.tools.push("desktop_use");
       }
       if (signal.aborted) throw new RouterError(408, "Router 请求已取消，未继续派发。");
+      await remote?.authorize();
       if (!hub?.source) throw new RouterError(503, "执行任务需要在本机 config.json 配置有效的 Source 凭据。任务未提交。");
       const target = hub.url + "/" + hub.source.name;
       if (saved && saved.target !== target) throw new RouterError(409, "该请求的中台地址或来源已改变，请在原中台核对事件。");
@@ -342,6 +343,7 @@ export function createRouter(options: {
           const type = variant ? variant.when.types[planning ? 1 : 0] : eventPrefix(projectId) + (planning ? ".plan" : ".direct");
           const revision = active.rulesRevision;
           // If a response was lost, the hub checks this same source and external ID before inserting anything.
+          await remote?.authorize();
           const accepted = await hubRequest<{ event: number }>(hub, "/v1/events", source.key, signal, {
             source: source.name, revision,
             body: { id: "router-" + id, type, subject: "task-" + id, summary: probe ? probe.summary : selectedPlan ? selectedPlan.plan.name + " · " + requirements?.type : "AI Router 提交的任务", detail: message },
@@ -469,7 +471,10 @@ export function createRouter(options: {
       }
     }, (rules, file, raw) => confirmLoaded(hub, rules, file, raw));
   }
-  return Object.assign(submit, { projects, agentModels, modelOptions, agentScan, registerAgent, changeProfile, listPlans, planProbe, ...plans, ...management });
+  const remoteMessage = (requestId: string, message: string, projectId: string | undefined, signal: AbortSignal, authorize: () => Promise<void>) =>
+    submit({ requestId, message, ...(projectId && { projectId, executionProfile: "auto" }) }, signal, "auto", undefined, { authorize });
+
+  return Object.assign(submit, { remoteMessage, projects, agentModels, modelOptions, agentScan, registerAgent, changeProfile, listPlans, planProbe, ...plans, ...management });
 }
 
 export type RouterHandler = ReturnType<typeof createRouter>;

@@ -5,3 +5,7 @@ dist/
 .DS_Store
 
 !.env.example
+
+# Private Feishu bridge state
+feishu-chat.json
+feishu-chat.sqlite*
