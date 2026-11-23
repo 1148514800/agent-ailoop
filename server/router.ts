@@ -103,7 +103,7 @@ async function modelText(response: Response) {
 }
 
 export async function classify(
-  config: Config, message: string, signal: AbortSignal, request = fetch, timeoutMs = 15_000, available: readonly ModelProfile[] = [], structured = false,
+  config: Config, message: string, signal: AbortSignal, request = fetch, timeoutMs = 60_000, available: readonly ModelProfile[] = [], structured = false,
 ): Promise<Decision> {
   const deadline = AbortSignal.timeout(timeoutMs);
   const profiles: readonly ExecutionProfile[] = available.length ? available : ["default"];

@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { codexResult } from "./feishu-result.ts";
+import { dataHome } from "./router-rule-config.ts";
 import { setTimeout as wait } from "node:timers/promises";
 import type { FeishuChatStatus } from "../shared/types.ts";
 import type { RouterRun } from "../shared/router.ts";
@@ -23,7 +27,7 @@ function publicSummary(input: string | null | undefined, secrets: (string | unde
   for (const secret of secrets.filter((value): value is string => !!value).sort((a, b) => b.length - a.length)) {
     text = text.replaceAll(secret, "[已隐藏]");
   }
-  text = text.replace(/```[\s\S]*?(?:```|$)|-----BEGIN [^-]+-----[\s\S]*?(?:-----END [^-]+-----|$)/g, "[已隐藏]")
+  text = text.replace(/-----BEGIN [^-]+-----[\s\S]*?(?:-----END [^-]+-----|$)/g, "[已隐藏]")
     .replace(/(?:\bBearer\s+\S+|\b[a-z0-9_-]*(?:key|secret|token|password|credential)[a-z0-9_-]*\s*[:=]\s*[^\r\n]+|(?:密钥|令牌|口令|密码|凭据)\s*[：:]\s*[^\r\n]+)/gi, "[已隐藏]")
     .replace(/\b[A-Z_][A-Z0-9_]{2,}\s*=\s*[^\r\n]+/g, "[已隐藏]")
     .replace(/\b(?:sk-|gh[pousr]_|github_pat_|AKIA|eyJ)[\w.-]+/g, "[已隐藏]")
@@ -220,8 +224,20 @@ export function createFeishuChat(options: {
       const failed = current.state === "cancelled" && /连续 \d+ 次没跑成/.test(current.summary ?? "");
       const status = failed ? "执行失败，已停止自动重试" : current.state === "cancelled" ? "已取消"
         : current.state === "nothing" ? "无需处理" : "已完成";
-      const summary = publicSummary(current.summary?.split("\n").find((line) => line.trim()), privateValues, 260);
-      records.status(task.id, "final", prefix + status + "。" + (summary ? "\n" + summary : ""), id, null, true);
+      let answer: string | undefined;
+      if (current.state === "done" && hub.localWorker && facts) {
+        const row = facts.flatMap((fact) => fact.changes).findLast((change) => change.table === "runs" && change.key === String(id))?.row;
+        try {
+          const rules = JSON.parse(await readFile(process.env.AGENT_AUTOLOOP_RULES ?? join(dataHome(), "rules.json"), "utf8"));
+          const agent = typeof row?.agent === "string" ? rules.agents?.[row.agent] : undefined;
+          if (agent?.worker === hub.localWorker && agent?.use === "codex" && typeof row?.session === "string") {
+            answer = await codexResult(dataHome(), id, current.attempts, row.session);
+          }
+        } catch { /* The hub summary remains available if local execution details cannot be verified. */ }
+      }
+      const summary = publicSummary(answer ?? current.summary, privateValues, 1800);
+      const note = current.state === "done" && !answer ? "\n（仅有中台摘要，完整结果不可用。）" : "";
+      records.status(task.id, "final", prefix + status + "。" + (summary ? "\n" + summary : "") + note, id, null, true);
     }
 
     async function poll() {
