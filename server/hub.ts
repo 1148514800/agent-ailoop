@@ -40,7 +40,7 @@ export async function loadHub(): Promise<Hub & { localService: boolean }> {
 
 type Row = Record<string, unknown>;
 const fields: Record<string, string[]> = {
-  runs: ["id", "rule", "agent", "state", "attempts", "not_before", "cancel_at", "session", "created_at", "claimed_at", "finished_at", "summary", "error", "manual", "rules_version"],
+  runs: ["id", "rule", "agent", "state", "attempts", "not_before", "cancel_at", "session", "created_at", "claimed_at", "finished_at", "summary", "error", "usage", "manual", "rules_version"],
   events: ["id", "source", "key", "type", "subject", "summary", "detail", "received_at", "routed", "paused"],
   cards: ["id", "title", "kind", "state", "rule", "run_id", "answer_event", "answer", "options", "choice", "result", "by", "created_at", "decided_at", "closed_at"],
   run_events: ["run_id", "event_id"],

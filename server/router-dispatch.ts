@@ -192,7 +192,7 @@ export function createRouter(options: {
       const availablePlans = matchingPlans(plans, rules, entry.id).map(({ plan, rule }) => ({
         ...plan, execution: publicExecution(executionConfig(rules, rule.to, rule.execution)!, secrets),
       }));
-      return { ...entry, execution, profiles, plans: availablePlans };
+      return { ...entry, scope: digest(JSON.stringify([entry.id, base.cwd])), execution, profiles, plans: availablePlans };
     })) };
   }
 

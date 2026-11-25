@@ -1,3 +1,5 @@
+import { routerHistory } from "./router-history.ts";
+import type { Fact } from "../shared/types.ts";
 import type { FeishuChatStatus } from "../shared/types.ts";
 import { serveBrowserCheck } from "./browser-proof.ts";
 import { createServer } from "node:http";
@@ -48,7 +50,7 @@ async function readObject(req: IncomingMessage): Promise<Row> {
   throw new RequestError(400, "请求必须是一个 JSON 对象。");
 }
 
-type Route = { path: string; stream?: boolean; why?: boolean; fields?: string[]; answer?: boolean };
+type Route = { path: string; stream?: boolean; why?: boolean; historyRun?: number; fields?: string[]; answer?: boolean };
 
 function route(method: string | undefined, url: URL, req: IncomingMessage): Route | null {
   const { pathname, searchParams } = url;
@@ -65,8 +67,11 @@ function route(method: string | undefined, url: URL, req: IncomingMessage): Rout
       if ((!url.search || (searchParams.size === 1 && searchParams.has("after"))) && number(after, true)) {
         return { path: "/v1/stream?after=" + after, stream: true };
       }
-    } else if (/^\/api\/runs\/[1-9]\d*\/why$/.test(pathname) && !url.search) {
-      return { path: pathname.replace("/api/", "/v1/"), why: true };
+    } else if (/^\/api\/runs\/[1-9]\d*\/why$/.test(pathname)) {
+      const id = pathname.split("/")[3];
+      if (number(id) && (!url.search || (searchParams.size === 1 && searchParams.get("view") === "router"))) {
+        return { path: pathname.replace("/api/", "/v1/"), why: true, historyRun: url.search ? Number(id) : undefined };
+      }
     } else return null;
     throw new RequestError(400, "查询参数不正确。");
   }
@@ -261,6 +266,7 @@ export function createConsole(options: {
           return json(res, upstream.status, { error: typeof value?.error === "string" ? value.error : "中台拒绝了请求。" }, hub);
         }
         if (target.stream) throw new Error("Invalid stream response");
+        if (target.historyRun) return json(res, 200, routerHistory(target.historyRun, value as Fact[]), hub);
         return json(res, upstream.status, target.why ? (value as Row[]).map(safeFact) : target.path.startsWith("/v1/state") ? stateForBrowser(value) : value, hub);
       } catch (error) {
         if (error instanceof RequestError) throw error;

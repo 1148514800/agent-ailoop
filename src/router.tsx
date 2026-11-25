@@ -1,215 +1,285 @@
-import { useEffect, useRef, useState } from "react";
-import { Plus, Send, Settings2, Sparkles } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowUp, Check, ChevronDown, CircleAlert, ClipboardCheck, Copy, Folder, LoaderCircle, Plus, Settings2 } from "lucide-react";
 import { MODEL_PROFILES, ROUTER_MESSAGE_LIMIT } from "../shared/router.ts";
-import type { ProfileChoice, RouterMode, RouterProject, RouterResult, TaskRequirements } from "../shared/router.ts";
-import type { State } from "../shared/types.ts";
-import { api, messageOf, runLabels, runStatus } from "./data.ts";
-import { PlanDialog, TaskFields, taskLabels } from "./execution-plans.tsx";
-import { ModelDetails, ModelProfileDialog, profileLabel } from "./router-models.tsx";
-import { RouterProjectDialog } from "./router-project-dialog.tsx";
+import type { ExecutionConfig, ProfileChoice, RouterHistory, RouterMode, RouterResult, TaskRequirements } from "../shared/router.ts";
+import type { Fact, State } from "../shared/types.ts";
+import { api, fmtDate, messageOf, runLabels, runStatus } from "./data.ts";
+import { PlanDialog, TaskFields } from "./execution-plans.tsx";
+import { configValue, ModelDetails, ModelProfileDialog, profileLabel } from "./router-models.tsx";
+import { historyPath, taskTitle, WorkspaceNotice } from "./router-workspace.tsx";
+import type { RouterWorkspace } from "./router-workspace.tsx";
 import type { Act } from "./runs.tsx";
-import { Badge, Button, Confirm, ErrorLine, Notice, Panel, TextLink } from "./ui.tsx";
+import { Button, ErrorLine, TextLink } from "./ui.tsx";
+import { responseText, TaskMarkdown } from "./task-markdown.tsx";
 
 type RouterSubmission = { requestId: string; message: string; projectId: string; needsPlan?: boolean; executionProfile: ProfileChoice; requirements?: TaskRequirements };
 export type SendRouterMessage = (body: RouterSubmission, mode: RouterMode) => Promise<RouterResult>;
 type Draft = { body: RouterSubmission; mode: RouterMode; projectName: string };
-const modeLabel = { auto: "AI 自动判断", direct: "直接创建任务" };
+type Received = { draft: Draft; result: RouterResult };
 
-export function RouterPanel({ state, send, act }: { state: State | null; send: SendRouterMessage; act: Act }) {
+const defaults: TaskRequirements = { type: "general", tools: [], complexity: "simple" };
+const modeLabel = { auto: "自动判断", direct: "直接执行" };
+const planLabel = (choice?: ProfileChoice) => choice === "auto" ? "自动选型" : choice === "fast" || choice === "strong" ? profileLabel[choice] : "默认方案";
+const configHint = (config?: ExecutionConfig) => config ? [config.name, config.model, config.effort].filter(Boolean).join(" · ") : "";
+
+function ResultText({ value, label }: { value: string; label: string }) {
+  const [feedback, setFeedback] = useState("");
+  return <section className="task-response">
+    <div className="task-section-heading"><h2>{label}</h2>
+      {responseText(value) && <button className="task-quiet" type="button" onClick={async () => {
+        try { await navigator.clipboard.writeText(responseText(value)); setFeedback("已复制"); }
+        catch { setFeedback("无法复制"); }
+      }}><Copy size={14} />{feedback || "复制结果"}</button>}
+    </div>
+    {responseText(value) ? <TaskMarkdown value={value} /> : <p className="muted">当前没有可显示的内容。</p>}
+  </section>;
+}
+
+export function RouterPanel({ visible, reset, id, state, facts, work, send, act, add, navigate, setPending, online }: {
+  visible: boolean; reset: number; id: number | null; state: State | null; facts: Fact[]; work: RouterWorkspace;
+  send: SendRouterMessage; act: Act; add(): void; navigate(route: string): void; setPending(value: boolean): void; online: boolean | null;
+}) {
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<RouterResult | null>(null);
+  const [busy, setBusy] = useState<Draft | null>(null);
+  const pending = useRef<Draft | null>(null);
+  const inFlight = useRef(false);
+  const [received, setReceived] = useState<Received | null>(null);
+  const [submissions, setSubmissions] = useState<Record<number, Received>>({});
   const [error, setError] = useState("");
-  const request = useRef<Draft | null>(null);
-  const [projects, setProjects] = useState<RouterProject[]>([]);
-  const [projectId, setProjectId] = useState("");
   const [mode, setMode] = useState<RouterMode>("auto");
   const [choice, setChoice] = useState<ProfileChoice>("auto");
-  const [classifierModel, setClassifierModel] = useState<string | null>(null);
-  const [editingPlans, setEditingPlans] = useState(false);
-  const [requirements, setRequirements] = useState<TaskRequirements>({ type: "general", tools: [], complexity: "simple" });
-  const [editingProfile, setEditingProfile] = useState(false);
+  const [requirements, setRequirements] = useState<TaskRequirements>(defaults);
   const [needsPlan, setNeedsPlan] = useState(false);
-  const [projectError, setProjectError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [reload, setReload] = useState(0);
-  const [adding, setAdding] = useState(false);
-  const [removing, setRemoving] = useState<RouterProject | null>(null);
-  const [notice, setNotice] = useState("");
-  const [sent, setSent] = useState<Draft | null>(null);
-  useEffect(() => {
-    let current = true;
-    setLoading(true);
-    setProjectError("");
-    void api<{ projects: RouterProject[]; classifierModel: string | null }>("/router/projects").then(({ projects, classifierModel }) => {
-      if (!current) return;
-      setProjects(projects);
-      setClassifierModel(classifierModel);
-      setProjectId((id) => projects.some((item) => item.id === id) ? id : projects.find((item) => item.id === "default")?.id ?? projects[0]?.id ?? "");
-    }).catch((error) => {
-      if (current) setProjectError(messageOf(error));
-    }).finally(() => { if (current) setLoading(false); });
-    return () => { current = false; };
-  }, [reload, state?.rulesRevision]);
-  const project = projects.find((item) => item.id === projectId);
-  const chosenPlan = project?.plans?.find((plan) => "plan:" + plan.id === choice);
-  const selected = choice.startsWith("plan:") ? chosenPlan?.execution
+  const [editing, setEditing] = useState<"plans" | "profiles" | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [picked, setPicked] = useState<{ id: number; record: RouterHistory | null }>();
+  const [historyError, setHistoryError] = useState("");
+  const [retry, setRetry] = useState(0);
+  const field = useRef<HTMLTextAreaElement>(null);
+  const options = useRef<HTMLDivElement>(null);
+  const composing = useRef(false);
+  const { project, projectId, projects } = work;
+  const custom = project?.plans?.find((plan) => "plan:" + plan.id === choice);
+  const selected = choice.startsWith("plan:") ? custom?.execution
     : choice === "fast" || choice === "strong" ? project?.profiles?.[choice] : project?.execution;
   const count = [...text].length;
-  const canSend = !!project && !project.error && !projectError && !loading && !!text.trim() && count <= ROUTER_MESSAGE_LIMIT && !!selected;
-  const activeRun = result?.action === "execute" ? result.run : null;
-  const current = activeRun && state?.runs.find((run) => run.id === activeRun.id);
-  const run = current || activeRun;
-  const status = run && (current ? runStatus(current) : run.state === "queued" && run.attempts > 0 ? "retry" : run.state);
-  const [statusText, tone] = status ? runLabels[status] ?? ["状态未知", "neutral"] : ["", "neutral"];
+  const canSend = !!project && !project.error && !work.projectError && !work.loading && online !== false &&
+    !!text.trim() && count <= ROUTER_MESSAGE_LIMIT && !!selected;
 
-  async function submit(draft: Draft) {
-    if (busy) return;
-    setBusy(true);
-    setResult(null);
-    setError("");
+  useEffect(() => {
+    setText(""); setReceived(null); setError(""); setMode("auto"); setChoice("auto");
+    setRequirements(defaults); setNeedsPlan(false); setAdvanced(false); pending.current = null;
+  }, [reset]);
+  useEffect(() => {
+    if (!work.loading && !selected && choice !== "default" && choice !== "auto") setChoice(mode === "auto" ? "auto" : "default");
+  }, [selected, work.loading, choice, mode]);
+  useLayoutEffect(() => {
+    if (!visible || !field.current) return;
+    const element = field.current;
+    element.style.height = "0px";
+    element.style.height = Math.min(224, element.scrollHeight) + "px";
+  }, [text, visible]);
+  useEffect(() => {
+    if (visible && !id && matchMedia("(pointer: fine)").matches) field.current?.focus({ preventScroll: true });
+  }, [visible, id, reset]);
+  useEffect(() => {
+    if (!advanced) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !options.current?.contains(event.target)) setAdvanced(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAdvanced(false);
+        options.current?.querySelector("button")?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [advanced]);
+
+  const liveRun = id ? state?.runs.find((run) => run.id === id) : undefined;
+  const changed = id ? facts.find(({ changes }) => changes.some(({ table, row }) =>
+    table === "runs" && row?.id === id || table === "cards" && row?.run_id === id))?.seq : undefined;
+  const runMarker = liveRun && [liveRun.state, liveRun.attempts, liveRun.claimedAt, liveRun.finishedAt, liveRun.stopping].join(":");
+  useEffect(() => {
+    if (!id || !visible) return;
+    const controller = new AbortController();
+    setHistoryError("");
+    void api<RouterHistory | null>(historyPath(id), { signal: controller.signal }).then((record) => {
+      if (!controller.signal.aborted) setPicked({ id, record });
+    }).catch((reason) => { if (!controller.signal.aborted) setHistoryError(messageOf(reason)); });
+    return () => controller.abort();
+  }, [id, retry, changed, runMarker, visible, state?.cards.length]);
+  const history = id && picked?.id === id ? picked.record : undefined;
+  const submission = id ? submissions[id] : received;
+  const result = submission?.result;
+  const draft = busy ?? submission?.draft;
+  const dispatch = result?.action === "execute" ? result : undefined;
+  const knownRun = history || dispatch?.run ? liveRun ?? history?.run : undefined;
+  const run = knownRun ?? dispatch?.run;
+  const execution = history?.execution ?? dispatch?.execution;
+  const original = busy?.body.message || history?.message || draft?.body.message;
+  const projectName = draft?.projectName ?? (history && projects.find((item) => item.scope === history.projectScope)?.name) ?? history?.projectId;
+  const displayedApprovals = history?.approvals.filter((card) => !state || state.cards.some((open) => open.id === card.id));
+  const status = knownRun ? runStatus(knownRun) : run?.state === "queued" && run.attempts > 0 ? "retry" : run?.state;
+  const failed = status === "cancelled" && /^连续 \d+ 次没跑成/.test(run?.summary ?? "");
+  const [stateLabel, tone] = failed ? ["执行失败", "red"] : status ? runLabels[status] ?? runLabels.unknown : ["", "neutral"];
+  const thread = !!(id || result || busy);
+  const canPlan = needsPlan && mode === "direct";
+  const projectOptions = projects.map((item) => <option value={item.id} key={item.id} disabled={!!item.error}>
+    {item.name}{item.error ? "（不可用）" : ""}
+  </option>);
+
+  async function submit(request: Draft, refresh = false) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setPending(true);
+    setBusy(request); setError(""); setAdvanced(false);
+    const startLocation = location.hash;
     try {
-      const received = await send(draft.body, draft.mode);
-      setSent(draft);
-      setResult(received);
-      setText("");
-      if (received.action === "reply" || received.run) request.current = null;
-    } catch (error) { setError(messageOf(error)); }
-    finally { setBusy(false); }
+      const response = await send(request.body, request.mode);
+      const entry = { draft: request, result: response };
+      setReceived(entry);
+      if (!refresh) setText("");
+      if (response.action === "execute" && response.run) {
+        const runId = response.run.id;
+        setSubmissions((previous) => ({ ...previous, [runId]: entry }));
+        if (location.hash === startLocation) navigate("#router/" + runId);
+      } else if (location.hash === startLocation) navigate("#router");
+      if (!refresh) pending.current = null;
+    } catch (reason) { setError(messageOf(reason)); }
+    finally { inFlight.current = false; setBusy(null); setPending(false); }
   }
 
-  return <Panel title="AI Router" icon={Sparkles} className="router-panel">
-    <form className="router-form" onSubmit={(event) => {
-      event.preventDefault();
-      if (!canSend || busy || !project) return;
-      const plan = mode === "direct" ? needsPlan : undefined;
-      const declared = mode === "direct"
-        ? { ...requirements, complexity: needsPlan ? "complex" as const : "simple" as const } : undefined;
-      const previous = request.current;
-      const pending = previous?.body.message === text && previous.body.projectId === projectId &&
-        previous.mode === mode && previous.body.needsPlan === plan && previous.body.executionProfile === choice && JSON.stringify(previous.body.requirements) === JSON.stringify(declared) ? previous : {
-          mode, projectName: project.name, body: { requestId: crypto.randomUUID(), message: text, projectId, needsPlan: plan, executionProfile: choice, requirements: declared },
-        };
-      request.current = pending;
-      void submit(pending);
-    }}>
-      <div className="router-controls">
-        <label className="field">目标项目
-          <select value={projectId} disabled={busy || loading || !projects.length} onChange={(event) => { setProjectId(event.target.value); setChoice(mode === "auto" ? "auto" : "default"); }}>
-            {!projects.length && <option value="">{loading ? "正在加载项目…" : "没有可选项目"}</option>}
-            {projects.map((item) => <option key={item.id} value={item.id}>
-              {item.name} · {item.id}{item.error ? "（不可用）" : ""}
-            </option>)}
-          </select>
-        </label>
-        <div className="router-project-actions">
-          <Button icon={Plus} disabled={busy} onClick={() => { setNotice(""); setAdding(true); }}>添加项目</Button>
-          {project?.execution?.use === "codex" && <Button icon={Settings2} disabled={busy || loading} onClick={() => setEditingProfile(true)}>模型档位设置</Button>}
-          <Button icon={Settings2} disabled={busy || loading || !projects.length} onClick={() => setEditingPlans(true)}>执行方案</Button>
-          {project?.directory && <Button disabled={busy || loading} onClick={() => { setNotice(""); setRemoving(project); }}>移除项目</Button>}
-        </div>
-        <fieldset className="router-modes" disabled={busy}>
-          <legend>执行模式</legend>
-          <label><input type="radio" name="router-mode" checked={mode === "auto"} onChange={() => { setMode("auto"); if (choice === "default") setChoice("auto"); }} />AI 自动判断</label>
-          <label><input type="radio" name="router-mode" checked={mode === "direct"} onChange={() => { setMode("direct"); if (choice === "auto") setChoice("default"); }} />直接创建任务</label>
-          {mode === "direct" && <label><input type="checkbox" checked={needsPlan} onChange={(event) => setNeedsPlan(event.target.checked)} />先规划再执行</label>}
-        </fieldset>
-        <label className="field">执行档位
-          <select value={choice} disabled={busy || loading || !project} onChange={(event) => setChoice(event.target.value as ProfileChoice)}>
-            {mode === "auto" && <option value="auto">{profileLabel.auto}</option>}
-            <option value="default">{profileLabel.default}</option>
-            {MODEL_PROFILES.map((profile) => <option key={profile} value={profile} disabled={!project?.profiles?.[profile]}>
-              {profileLabel[profile]}{project?.profiles?.[profile] ? "" : "（未配置）"}
-            </option>)}
-            {project?.plans?.map((item) => <option key={item.id} value={"plan:" + item.id}>{item.name}</option>)}
-          </select>
-        </label>
-      </div>
-      {mode === "direct" && <fieldset className="router-modes" disabled={busy}>
-        <legend>任务要求</legend><TaskFields requirements={requirements} change={setRequirements} />
-      </fieldset>}
-      {project?.execution && <div className="router-config">
-        {mode === "auto" && <div><strong>Router 分类模型</strong><span>{classifierModel ?? "未配置或不可用"}</span></div>}
-        {choice === "auto" && !!project.plans?.length
-          ? <span>按任务类型和已验证的工具能力选择执行方案</span>
-          : choice === "auto" && MODEL_PROFILES.some((profile) => project.profiles?.[profile])
-          ? MODEL_PROFILES.flatMap((profile) => {
-            const config = project.profiles?.[profile];
-            return config ? [<div key={profile}><strong>{profileLabel[profile]}</strong><ModelDetails config={config} /></div>] : [];
-          })
-          : selected && <div><strong>{chosenPlan?.name ?? (choice === "auto" ? "默认配置" : choice === "fast" || choice === "strong" ? profileLabel[choice] : profileLabel.default)}</strong><ModelDetails config={selected} /></div>}
-      </div>}
-      {(projectError || project?.error || (!loading && !projects.length)) && <div className="router-actions">
-        <ErrorLine>{projectError || project?.error || "请先添加一个项目。"}</ErrorLine>
-        <Button type="button" disabled={busy || loading} onClick={() => setReload((value) => value + 1)}>重新加载项目</Button>
-      </div>}
-      <label className="field">消息
-        <textarea value={text} onChange={(event) => setText(event.target.value)} disabled={busy}
-          placeholder="例如，解释一个概念，或帮我修改 README 中的错别字" />
-      </label>
-      <div className="router-actions">
-        <span className="muted">{mode === "auto" ? "消息会发送到配置的模型。" : "任务将交给所选项目执行。"}<span className={count > ROUTER_MESSAGE_LIMIT ? "router-limit" : ""}> {count}/{ROUTER_MESSAGE_LIMIT}</span></span>
-        <Button type="submit" icon={Send} variant="primary" busy={busy} disabled={!canSend}>{busy ? "处理中…" : mode === "direct" ? "创建任务" : "发送"}</Button>
-      </div>
-      {error && <ErrorLine>{error}</ErrorLine>}
-      {notice && <Notice>{notice}</Notice>}
-    </form>
-    {editingPlans && <PlanDialog projects={projects} act={act} close={() => setEditingPlans(false)} changed={() => {
-      setChoice(mode === "auto" ? "auto" : "default");
-      setReload((value) => value + 1);
-    }} />}
-    {editingProfile && project && <ModelProfileDialog project={project} act={act} close={() => setEditingProfile(false)} saved={(profile) => {
-      setEditingProfile(false);
-      setLoading(true);
-      setReload((value) => value + 1);
-      setNotice(profileLabel[profile] + " 档位已保存。");
-    }} />}
-    {adding && <RouterProjectDialog act={act} close={() => setAdding(false)} added={(id) => {
-      setAdding(false);
-      setLoading(true);
-      setProjectId(id);
-      setChoice(mode === "auto" ? "auto" : "default");
-      setReload((value) => value + 1);
-      setNotice("项目已添加。");
-    }} />}
-    {removing && <Confirm disabled={false} close={() => setRemoving(null)} complete={(message) => {
-      setLoading(true);
-      setRemoving(null);
-      setChoice(mode === "auto" ? "auto" : "default");
-      setReload((value) => value + 1);
-      setNotice(message);
-    }} action={{
-      title: "移除项目",
-      description: `将「${removing.name}」（${removing.directory}）从 AI Router 的目标项目中移除。工程文件、规则和历史记录会保留。`,
-      confirm: "确认移除", danger: true,
-      async run() {
-        await act("/router/projects/remove", { projectId: removing.id });
-        return "项目已从 AI Router 移除。";
-      },
-    }} />}
-    {result && <div className="router-result" aria-live="polite">
-      {sent && <div className="muted">{sent.projectName} · {modeLabel[sent.mode]}</div>}
-      {result.action === "reply" ? <>
-        <Badge tone="blue">直接回答</Badge><p className="body-copy">{result.answer}</p>
-      </> : <>
-        <div className="router-result-head">
-          <Badge tone="violet">{result.needs_plan ? sent?.mode === "direct" ? "先规划再执行" : "建议先规划" : "直接执行"}</Badge>
-          {run && <Badge tone={tone} dot>{statusText}</Badge>}
-          <span className="muted">事件 #{result.eventId}</span>
-          {run && <TextLink to={"#runs/" + run.id}>查看第 {run.id} 轮</TextLink>}
-        </div>
-        {result.execution && <div className="router-config">
-          <div><strong>选择档位</strong><span>{result.planName ?? (result.execution_profile === "fast" || result.execution_profile === "strong" ? profileLabel[result.execution_profile] : profileLabel.default)}</span></div>
-          {result.requirements && <div><strong>任务类型</strong><span>{taskLabels[result.requirements.type]}</span></div>}
-          <div><strong>先规划</strong><span>{result.needs_plan ? "是" : "否"}</span></div>
-          <ModelDetails config={result.execution} />
-        </div>}
-        {result.status === "paused" && <p className="muted">规则已暂停，事件已记录，等待补跑。</p>}
-        {result.status === "unmatched" && <p className="muted">事件已记录，未匹配所选项目的规则。</p>}
-        {run?.summary && <p className="body-copy">{run.summary}</p>}
-        {run?.error && <ErrorLine>{run.error}</ErrorLine>}
-        {!run && request.current && <Button disabled={!!text} onClick={() => { if (request.current) void submit(request.current); }}>刷新路由结果</Button>}
-      </>}
+  const changeMode = (value: RouterMode) => {
+    setMode(value);
+    if (value === "direct" && choice === "auto") setChoice("default");
+    if (value === "auto" && choice === "default") setChoice("auto");
+  };
+
+  return <section className={"router-panel task-workbench " + (thread ? "task-thread" : "task-blank")} aria-label="AI Router 工作台">
+    {!thread && <div className="task-welcome">
+      <img src="/mark.svg" alt="" width="48" height="48" />
+      <h1>今天想完成什么？</h1>
+      <div className="task-project-select"><Folder size={15} /><select aria-label="目标项目" value={projectId}
+        disabled={!projects.length || work.loading} onChange={(event) => work.setProjectId(event.target.value)}>
+        {!projects.length && <option value="">{work.loading ? "正在加载项目…" : "没有可用项目"}</option>}
+        {projectOptions}
+      </select><ChevronDown size={14} /></div>
     </div>}
-  </Panel>;
+    {thread && <article className="router-result">
+      <header className="task-title">
+        <h1>{taskTitle(original ?? "", id ? "任务 #" + id : "新任务")}</h1>
+        <p>{[projectName, !busy && run ? "Run #" + run.id : null].filter(Boolean).join(" · ")}</p>
+      </header>
+      {original && <div className="task-message">{original}</div>}
+      {busy ? <p className="task-progress" role="status"><LoaderCircle size={16} className="spin" />
+        {busy.mode === "auto" ? "正在判断任务…" : "正在确认任务…"}
+      </p> : result?.action === "reply" ? <ResultText key={result.answer} value={result.answer} label="AI 回复" /> :
+      (dispatch || run) ? <>
+        {execution && <details className="task-execution">
+          <summary><Settings2 size={15} /><span>{history?.planName || dispatch?.planName || planLabel(dispatch?.execution_profile)}</span>
+            <small>{execution.name} · {configValue(execution, "model")} · {configValue(execution, "effort")}</small><ChevronDown size={15} /></summary>
+          <ModelDetails config={execution} />
+        </details>}
+        <div className="task-run-state" aria-live="polite">
+          {run && <p><Check size={15} />任务已创建</p>}
+          {knownRun?.claimedAt && <p><Check size={15} />Worker 已领取任务</p>}
+          {(history?.needsPlan ?? dispatch?.needs_plan) && <p><Check size={15} />先规划再执行</p>}
+          {run && !displayedApprovals?.length && <p className={"task-state task-state-" + tone}><span className={"task-dot task-dot-" + tone} />{stateLabel}
+            {status === "retry" && knownRun?.notBefore && state && <small>{fmtDate(knownRun.notBefore, state.timezone, "full")} 后可重试</small>}</p>}
+          {displayedApprovals?.map((card) => <p key={card.id} className="task-state-amber"><ClipboardCheck size={16} />
+            <TextLink to={"#approvals/" + card.id}>等待审批 · {card.title || "卡片 #" + card.id}</TextLink></p>)}
+          {!run && dispatch && <p className="task-state-amber"><CircleAlert size={15} />{dispatch.status === "paused" ? "规则已暂停，等待补跑。" : "事件已记录，未匹配规则。"} 事件 #{dispatch.eventId}</p>}
+        </div>
+        {run?.summary && <ResultText key={run.id + run.summary} value={run.summary} label="任务摘要" />}
+        {run?.error && <ErrorLine>{responseText(run.error)}</ErrorLine>}
+        {run && <TextLink to={"#router/" + run.id + "?details=1"}>查看执行详情</TextLink>}
+        {!run && dispatch && submission && <Button onClick={() => void submit(submission.draft, true)}>刷新路由结果</Button>}
+      </> : historyError ? <><ErrorLine>{historyError}</ErrorLine><Button onClick={() => setRetry((value) => value + 1)}>重新读取任务</Button></> :
+      history === null && id ? <p className="muted">该轮没有可确认的 Router 记录。<TextLink to={"#runs/" + id}>查看轮次详情</TextLink></p> :
+      <p className="muted" role="status">正在读取任务…</p>}
+    </article>}
+    <div className="task-compose-wrap">
+      <form className="task-composer" onSubmit={(event) => {
+        event.preventDefault();
+        if (!canSend || inFlight.current || !project) return;
+        const body = { message: text, projectId, needsPlan: mode === "direct" ? needsPlan : undefined, executionProfile: choice,
+          requirements: mode === "direct" ? { ...requirements, complexity: canPlan ? "complex" as const : "simple" as const } : undefined };
+        const previous = pending.current;
+        const requestId = previous?.body.requestId;
+        const request = previous?.mode === mode && JSON.stringify(previous.body) === JSON.stringify({ requestId, ...body })
+          ? previous : { body: { requestId: crypto.randomUUID(), ...body }, mode, projectName: project.name };
+        pending.current = request;
+        void submit(request);
+      }}>
+        <textarea ref={field} aria-label="消息" rows={2} value={text} readOnly={!!busy} onChange={(event) => setText(event.target.value)}
+          placeholder={thread ? "输入下一项独立任务…" : "描述你的任务，或提出一个问题…"} onCompositionStart={() => { composing.current = true; }}
+          onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }} />
+        <div className="composer-tools">
+          <div className="composer-select"><select aria-label="执行模式" disabled={!!busy} value={mode} onChange={(event) => changeMode(event.target.value as RouterMode)}>
+            <option value="auto">{modeLabel.auto}</option><option value="direct">{modeLabel.direct}</option>
+          </select><ChevronDown size={13} /></div>
+          <div className="composer-select composer-profile"><select aria-label="执行方案" value={choice} disabled={!!busy || !project || work.loading}
+            onChange={(event) => setChoice(event.target.value as ProfileChoice)}>
+            {mode === "auto" && <option value="auto">自动选型</option>}
+            <option value="default" title={configHint(project?.execution)}>默认方案</option>
+            {MODEL_PROFILES.map((level) => <option key={level} value={level} disabled={!project?.profiles?.[level]}
+              title={configHint(project?.profiles?.[level])}>{profileLabel[level]}{project?.profiles?.[level] ? "" : "（未配置）"}</option>)}
+            {project?.plans?.map((plan) => <option key={plan.id} value={"plan:" + plan.id} title={configHint(plan.execution)}>{plan.name}</option>)}
+          </select><ChevronDown size={13} /></div>
+          <div className="composer-options" ref={options}>
+            <button className="task-quiet task-gear" type="button" aria-label="高级选项" title="高级选项" aria-expanded={advanced}
+              disabled={!!busy} onClick={() => setAdvanced(!advanced)}><Settings2 size={17} /></button>
+            {advanced && <div className="advanced-panel" aria-label="高级设置">
+              <h2>高级选项</h2>
+              {mode === "direct" ? <>
+                <label className="option-check"><input type="checkbox" checked={needsPlan} onChange={(event) => setNeedsPlan(event.target.checked)} />先规划再执行</label>
+                <TaskFields requirements={requirements} change={setRequirements} />
+              </> : <p className="muted">由 Router 判断是否先规划，以及需要的任务类型和工具能力。</p>}
+              <div className="advanced-config">
+                {mode === "auto" && <p>分类模型 <strong>{work.classifierModel ?? "未配置或不可用"}</strong></p>}
+                {choice === "auto" && <p className="muted">以下为默认方案，实际配置以匹配结果为准。</p>}
+                {selected && <ModelDetails config={selected} />}
+              </div>
+              <div className="advanced-actions">
+                <Button disabled={!projects.length} onClick={() => { setAdvanced(false); setEditing("plans"); }}>执行方案</Button>
+                {project?.execution?.use === "codex" && <Button onClick={() => { setAdvanced(false); setEditing("profiles"); }}>模型档位设置</Button>}
+              </div>
+            </div>}
+          </div>
+          <div className="composer-send">
+            {count >= ROUTER_MESSAGE_LIMIT * .85 && <span className={count > ROUTER_MESSAGE_LIMIT ? "router-limit" : "muted"}>{count}/{ROUTER_MESSAGE_LIMIT}</span>}
+            <button type="submit" className="task-send" aria-label={busy ? "处理中" : "发送"} title="发送（Enter）" disabled={!canSend || !!busy}>
+              {busy ? <LoaderCircle size={17} className="spin" /> : <ArrowUp size={19} />}
+            </button>
+          </div>
+        </div>
+      </form>
+      {thread && <div className="composer-note">
+        {!!projects.length && <div className="task-project-select"><Folder size={13} />
+          <select aria-label="下一项任务的项目" value={projectId} disabled={!!busy || work.loading} onChange={(event) => work.setProjectId(event.target.value)}>
+            {projectOptions}
+          </select><ChevronDown size={13} /></div>}
+        <span>{result?.action === "reply" ? "聊天仅保留在当前页面，刷新后清除。 " : ""}每次发送都是独立请求。</span>
+      </div>}
+      {error && <ErrorLine>{error}</ErrorLine>}
+      {(work.projectError || project?.error) && <div className="task-project-error"><ErrorLine>{work.projectError || project?.error}</ErrorLine>
+        <Button onClick={work.reloadProjects}>重新加载项目</Button></div>}
+      {!work.loading && !projects.length && <Button icon={Plus} onClick={add}>添加项目</Button>}
+      <WorkspaceNotice work={work} />
+    </div>
+    {editing === "plans" && <PlanDialog projects={projects} act={act} close={() => setEditing(null)} changed={work.reloadProjects} />}
+    {editing === "profiles" && project && <ModelProfileDialog project={project} act={act} close={() => setEditing(null)} saved={(profile) => {
+      setEditing(null); work.reloadProjects(); work.setNotice(profileLabel[profile] + " 档位已保存。");
+    }} />}
+  </section>;
 }

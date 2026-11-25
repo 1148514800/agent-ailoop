@@ -346,6 +346,20 @@ test("project discovery, dispatch and restart recovery preserve project and plan
       assert.equal(job.context.events[0].type, type);
       await worker.result(job.run, job.token, { outcome: "done" });
     }
+    const historyUrl = base + "/api/runs/" + b.run.id + "/why?view=router";
+    assert.equal((await fetch(historyUrl)).status, 401);
+    const history = await fetch(historyUrl, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(history.projectId, "game-box");
+    assert.equal(history.message, plan.message);
+    assert.equal(history.run.state, "done");
+    assert.equal(history.execution.agent, "lab");
+    assert.equal(history.needsPlan, true);
+    assert.equal(history.projectScope, (await projects()).projects.find(({ id }: { id: string }) => id === "game-box").scope);
+    await save({ ...rules, rules: [rule, { ...added, cwd: codexHome }] });
+    assert.notEqual(history.projectScope, (await projects()).projects.find(({ id }: { id: string }) => id === "game-box").scope);
+    assert.deepEqual(await fetch(historyUrl, { headers: { cookie } }).then((response) => response.json()), history);
+    await save({ ...rules, rules: [rule, added] });
+
     const beforeFailures = state().sources[0].events;
     for (const patch of [{ projectId: "../game-box" }, { projectId: "missing" }, { cwd: home }, { needsPlan: "true" }]) {
       assert.ok((await submit({ ...plan, requestId: randomUUID(), ...patch })).status >= 400);

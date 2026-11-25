@@ -1,4 +1,4 @@
-import type { RunState } from "./types.ts";
+import type { Run, RunState } from "./types.ts";
 
 export const ROUTER_MESSAGE_LIMIT = 4000;
 export const MODEL_PROFILES = ["fast", "strong"] as const;
@@ -8,7 +8,7 @@ export type ExecutionProfile = "default" | ModelProfile | PlanChoice;
 export type ProfileChoice = "auto" | ExecutionProfile;
 export type ExecutionConfig = { agent: string; name: string; use: string; worker: string; model: string | null; effort: string | null; tier: string | null };
 export type RouterProject = {
-  id: string; name: string; rule: string; error?: string; directory?: string;
+  id: string; name: string; rule: string; error?: string; directory?: string; scope?: string;
   execution?: ExecutionConfig;
   profiles?: Partial<Record<ModelProfile, ExecutionConfig>>;
   plans?: (ExecutionPlan & { execution: ExecutionConfig })[];
@@ -52,3 +52,22 @@ export type ExecutionPlan = {
   capabilities: ToolCapability[];
   provider?: DshProvider;
 };
+
+export type RouterHistory = {
+  projectId: string; projectScope: string; message: string; needsPlan: boolean; planName?: string;
+  execution?: ExecutionConfig; run: Run;
+  approvals: { id: number; title: string }[];
+};
+
+// Pair the rule and event, including the version of a generated rule. A rule name alone
+// also appears on manually triggered runs and approval continuations.
+export function routerProjectOf(rule: string, events: { type: string; subject?: string | null }[]) {
+  const profile = /^ai-profile-([a-z0-9-]+)-(fast|strong)-([a-f0-9]{24})$/.exec(rule);
+  const plan = /^ai-plan\/([a-z0-9-]+)\/([a-f0-9]{24})$/.exec(rule);
+  const id = profile?.[1] ?? plan?.[1] ?? (rule === "ai-router" ? "default" : /^ai-project-([a-z0-9-]+)$/.exec(rule)?.[1]);
+  if (!id || !events.length) return;
+  const prefix = profile ? "router.profile." + profile[3] : plan ? "router.plan." + plan[2]
+    : id === "default" ? "router.task" : "router.project." + id;
+  if (events.every(({ type, subject }) => (type === prefix + ".direct" || type === prefix + ".plan") &&
+      /^task-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(subject ?? ""))) return id;
+}

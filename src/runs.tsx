@@ -133,7 +133,13 @@ function timelineOf(id: number, facts: Fact[]) {
     }
     if (title || changes.length) history.push({ seq: fact.seq, at: fact.at, title: title || labelOf(fact), detail: changes.join("\n"), links });
   }
-  return { history, latest };
+  const events = new Map<number, FactRow>();
+  for (const { changes } of facts) for (const { table, row } of changes) {
+    if (table === "events" && row && eventIds.has(Number(row.id))) events.set(Number(row.id), row);
+  }
+  return { history, latest, associated: [...events.values()].map((row) => ({
+    source: text(row.source), type: text(row.type), summary: text(row.summary), subject: text(row.subject),
+  })) };
 }
 
 export function RunDetail({ id, state, facts, close, act, choose, disabled }: {
@@ -152,13 +158,18 @@ export function RunDetail({ id, state, facts, close, act, choose, disabled }: {
     return () => controller.abort();
   }, [id, retry, lastChange]);
   const current = state.runs.find((run) => run.id === id);
-  const { history, latest } = timelineOf(id, why ?? []);
+  const { history, latest, associated } = timelineOf(id, why ?? []);
+  const runEvents = current?.events ?? associated;
+  let recordedUsage: Run["usage"] = null;
+  if (typeof latest?.usage === "string") {
+    try { recordedUsage = JSON.parse(latest.usage); } catch { /* Old facts may not contain usage. */ }
+  }
   const row = current ?? (latest ? {
     id, rule: text(latest.rule), agent: text(latest.agent), state: latest.state as Run["state"],
     attempts: Number(latest.attempts) || 0, stopping: !!latest.cancel_at, manual: !!latest.manual,
     createdAt: text(latest.created_at), claimedAt: text(latest.claimed_at) || null,
     finishedAt: text(latest.finished_at) || null, notBefore: text(latest.not_before) || null,
-    session: text(latest.session) || null, error: text(latest.error), summary: text(latest.summary), usage: null,
+    session: text(latest.session) || null, error: text(latest.error), summary: text(latest.summary), usage: recordedUsage,
   } : null);
   const stop = () => {
     if (!row) return;
@@ -191,7 +202,7 @@ export function RunDetail({ id, state, facts, close, act, choose, disabled }: {
       {row.error && <ErrorLine>{row.error}</ErrorLine>}
       {["claimed", "queued"].includes(row.state) && !row.stopping && <Button icon={Square} variant="danger" onClick={stop} disabled={disabled}>停止任务</Button>}
     </>}
-    {current?.events.length ? <div className="detail-block"><h4>关联事件</h4><ul className="plain-list">{current.events.map((event, index) => <li key={index}>
+    {runEvents.length ? <div className="detail-block"><h4>关联事件</h4><ul className="plain-list">{runEvents.map((event, index) => <li key={index}>
       <strong>{event.summary || event.type}</strong><small>{event.source} · {event.type}{event.subject ? " · " + event.subject : ""}</small>
     </li>)}</ul></div> : null}
     <div className="detail-block"><h4><Clock3 size={16} /> 执行时间线</h4><p className="muted">时间线记录中台事实。当前协议未提供 Agent 的实时输出。</p>

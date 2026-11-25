@@ -118,5 +118,14 @@ export async function fixture(home) {
     await stopped;
     runtime.db.close();
   };
-  return { url, emit, claim, finish, state, close, disconnect, running, claimRouter: () => claim([], routerWorker) };
+  function exhaustRouter(id) {
+    for (let attempt = 1; attempt < 10; attempt++) {
+      const run = runtime.getView().get("runs", id);
+      const at = Date.parse(run.not_before) + 1;
+      const job = runtime.execute("claimNext", ["router-worker", "retry-" + attempt], at);
+      assert.equal(job.run, id);
+      runtime.execute("finish", [job.run, job.token, { outcome: "failed", error: "示例服务暂时无法连接" }], at + 1);
+    }
+  }
+  return { url, emit, claim, finish, state, close, disconnect, running, exhaustRouter, claimRouter: () => claim([], routerWorker) };
 }

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, Bot, ChevronRight, ClipboardCheck, LayoutDashboard, ListTodo, LoaderCircle, LockKeyhole, Menu, Moon, RefreshCw, Server, Settings2, Sun, Workflow, X } from "lucide-react";
+import { Activity, Bot, ClipboardCheck, LayoutDashboard, ListTodo, LoaderCircle, Menu, Moon, PanelLeft, RefreshCw, Server, Settings2, SquarePen, Sun, Workflow, X } from "lucide-react";
 import type { Pause } from "../shared/types.ts";
 import { Approvals } from "./approvals.tsx";
 import { Dashboard } from "./dashboard.tsx";
 import { RouterPanel } from "./router.tsx";
 import type { SendRouterMessage } from "./router.tsx";
-import type { RouterResult } from "../shared/router.ts";
+import { ProjectDialogs, ProjectSidebar, useRouterWorkspace } from "./router-workspace.tsx";
+import type { RouterProject, RouterResult } from "../shared/router.ts";
 import { api, ApiError, fmtDate, messageOf } from "./data.ts";
 import { useLive } from "./live.ts";
 import { Agents, Rules, Settings } from "./manage.tsx";
@@ -26,7 +27,7 @@ const navigation = [
   { id: "settings", name: "运行设置", icon: Settings2 },
 ] as const;
 
-const defaultRoute = navigation[0];
+const defaultRoute = { id: "router", name: "新建任务" } as const;
 type Session = { csrf: string };
 type Theme = "dark" | "light";
 
@@ -44,17 +45,30 @@ function positiveId(value: string | null) {
 }
 
 function Brand() {
-  return <div className="brand"><img src="/mark.svg" alt="" width="39" height="39" /><div><strong>Autoloop</strong><small>管理控制台</small></div></div>;
+  return <div className="brand"><img src="/mark.svg" alt="" width="39" height="39" /><div><strong>Autoloop</strong><small>AGENT 工作台</small></div></div>;
 }
 
 function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): void; theme: Theme; setTheme(value: Theme): void }) {
   const [route, setRoute] = useState(readRoute);
   const [mobileNav, setMobileNav] = useState(false);
+  const [rail, setRail] = useState(() => localStorage.getItem("autoloop-sidebar") !== "closed");
+  const [reset, setReset] = useState(0);
+  const [routerPending, setRouterPending] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<RouterProject | null>(null);
   const [action, setAction] = useState<Action | null>(null);
   const [toast, setToast] = useState("");
   const [resumed, setResumed] = useState<Map<string, Pause>>(() => new Map());
   const live = useLive(expired);
   const { state, online } = live;
+  const work = useRouterWorkspace(state, live.generation);
+  useEffect(() => { localStorage.setItem("autoloop-sidebar", rail ? "open" : "closed"); }, [rail]);
+  useEffect(() => {
+    if (!mobileNav) return;
+    const dismiss = (event: KeyboardEvent) => { if (event.key === "Escape") setMobileNav(false); };
+    document.addEventListener("keydown", dismiss);
+    return () => document.removeEventListener("keydown", dismiss);
+  }, [mobileNav]);
   useEffect(() => {
     const onHash = () => { setRoute(readRoute()); setMobileNav(false); };
     window.addEventListener("hashchange", onHash);
@@ -70,6 +84,12 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
     if (location.hash !== hash) location.hash = hash;
     else setMobileNav(false);
   };
+  const freshTask = () => {
+    if (routerPending) return;
+    setReset((value) => value + 1);
+    navigate("#router");
+  };
+  const addProject = () => { setMobileNav(false); setAdding(true); };
   const write: Act = async (path, body) => {
     try {
       return await api(path, { body, csrf });
@@ -94,24 +114,29 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
   const pid = route.page.id;
   const detailId = positiveId(route.detail);
   const upToDate = state && !live.error;
-  return <div className="layout">
+  return <div className={`layout ${rail ? "" : "rail-closed"} ${pid === "router" ? "router-layout" : ""}`}>
     {mobileNav && <button className="nav-scrim" type="button" aria-label="关闭导航" onClick={() => setMobileNav(false)} />}
-    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
-      <a className="brand-link" href="#overview" aria-label="Autoloop 运行总览" onClick={() => setMobileNav(false)}><Brand /></a>
-      <div className="workspace-switch"><span className="workstation-icon"><Server size={15} /></span><div><strong>本地工作区</strong><small>127.0.0.1</small></div></div>
-      <nav aria-label="主导航">
-        <div className="nav-label">工作台</div>
-        {navigation.filter((item) => item.id !== "settings").map(({ id, name, icon: Icon }) =>
+    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`} aria-label="工作台侧栏">
+      <a className="brand-link" href="#router" aria-label="Autoloop 新建任务" onClick={(event) => { event.preventDefault(); freshTask(); }}><Brand /></a>
+      <div className="rail-primary"><button type="button" className="rail-command rail-new" disabled={routerPending} onClick={freshTask}>
+        <SquarePen size={16} /><span>新建任务</span></button>
+      <ProjectSidebar work={work} active={pid === "router" ? detailId : null} select={(project) => {
+        if (routerPending) return;
+        work.setProjectId(project.id); freshTask();
+      }} open={(id) => navigate("#router/" + id)} add={addProject} remove={(project) => { setMobileNav(false); setRemoving(project); }} />
+      </div>
+      <nav aria-label="主导航" className="rail-management">
+        <div className="rail-section-label">管理</div>
+        {navigation.map(({ id, name, icon: Icon }) =>
           <a key={id} href={"#" + id} aria-current={pid === id ? "page" : undefined} onClick={() => setMobileNav(false)}>
-            <Icon size={18} /><span>{name}</span>{id === "approvals" && !!state?.cards.length && <small className="nav-count">{state.cards.length}</small>}</a>)}
-        <div className="nav-group"><div className="nav-label">系统</div><a href="#settings" aria-current={pid === "settings" ? "page" : undefined} onClick={() => setMobileNav(false)}><Settings2 size={18} /><span>运行设置</span></a></div>
+            <Icon size={16} /><span>{name}</span>{id === "approvals" && !!state?.cards.length && <small className="nav-count">{state.cards.length}</small>}</a>)}
       </nav>
-      <div className="sidebar-bottom"><span className="workstation-icon"><LockKeyhole size={15} /></span><div><strong>本机连接</strong><small>所有请求经由本地代理</small></div></div>
     </aside>
     <div className="workspace">
       <header className="topbar">
         <div className="breadcrumb"><Button className="icon-button mobile-menu" icon={Menu} aria-label="打开导航" aria-expanded={mobileNav} onClick={() => setMobileNav(!mobileNav)} />
-          <span className="breadcrumb-root">工作台</span><ChevronRight size={14} className="breadcrumb-root" /><strong>{route.page.name}</strong></div>
+          <Button className="icon-button desktop-menu" icon={PanelLeft} aria-label={rail ? "折叠侧栏" : "展开侧栏"} aria-expanded={rail} onClick={() => setRail(!rail)} />
+          <strong>{pid === "router" && detailId ? "任务详情" : route.page.name}</strong></div>
         <div className="top-actions">
           <Badge tone={online ? "green" : online === false ? "red" : "neutral"} dot>{online ? "中台在线" : online === false ? "中台离线" : "检测中"}</Badge>
           <span className="top-divider" />
@@ -119,10 +144,17 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
           <Button className="icon-button" icon={theme === "dark" ? Sun : Moon} aria-label={theme === "dark" ? "切换浅色主题" : "切换深色主题"} title={theme === "dark" ? "切换浅色主题" : "切换深色主题"} onClick={() => setTheme(theme === "dark" ? "light" : "dark")} />
         </div>
       </header>
-      <main className="content" id="main-content">
+      <main className={pid === "router" ? "content router-content" : "content"} id="main-content">
         {live.error && <ErrorLine>{live.error}{state && ` 当前显示 ${fmtDate(state.now, state.timezone, "full")} 的快照。`}</ErrorLine>}
-        {pid === "settings" ? <Settings live={live} /> : state ? <>
-          {pid === "overview" && <Dashboard state={state} sendRouter={sendRouter} act={write} />}
+        <div className="router-host" hidden={pid !== "router"}>
+          <RouterPanel visible={pid === "router"} reset={reset} id={pid === "router" ? detailId : null} state={state} facts={live.facts}
+            work={work} send={sendRouter} act={write} add={addProject} navigate={navigate} setPending={setRouterPending} online={online} />
+        </div>
+        {pid === "router" && detailId && route.query.get("details") === "1" && state &&
+          <RunDetail key={detailId} id={detailId} state={state} facts={live.facts} act={write}
+            close={() => navigate("#router/" + detailId)} choose={setAction} disabled={writeDisabled} />}
+        {pid === "router" ? null : pid === "settings" ? <Settings live={live} /> : state ? <>
+          {pid === "overview" && <Dashboard state={state} newTask={freshTask} />}
           {pid === "runs" && <Runs key={live.generation} state={state} query={route.query} navigate={navigate} />}
           {pid === "rules" && <Rules state={state} name={route.detail} close={() => navigate("#rules")} act={write} choose={setAction}
             disabled={writeDisabled} resumed={resumed} setResumed={(name, pause) => setResumed((previous) => new Map(previous).set(name, pause))} />}
@@ -134,13 +166,14 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
             disabled={writeDisabled} />}
         </> : <>
           <Heading title={route.page.name} description="连接本机 Agent Autoloop 中台。" />
-          {pid === "overview" && <RouterPanel state={null} send={sendRouter} act={write} />}
           <div className="panel">{live.error ? <Empty title="暂时无法读取中台" icon={Server}><Button icon={RefreshCw} onClick={() => void live.refresh()} busy={live.refreshing}>重新连接</Button></Empty>
             : <Empty title="正在加载中台状态" icon={LoaderCircle}>正在读取当前快照…</Empty>}</div>
         </>}
-        {upToDate && <footer className="content-foot"><span>Agent Autoloop</span><span>快照 <code>#{state.seq}</code> <span className="foot-dot">·</span> {state.timezone}</span></footer>}
+        {upToDate && pid !== "router" && <footer className="content-foot"><span>Agent Autoloop</span><span>快照 <code>#{state.seq}</code> <span className="foot-dot">·</span> {state.timezone}</span></footer>}
       </main>
     </div>
+    <ProjectDialogs work={work} act={write} adding={adding} removing={removing} close={() => { setAdding(false); setRemoving(null); }}
+      added={(id) => { work.setProjectId(id); freshTask(); }} />
     {toast && <div className="toast"><Notice>{toast}<button type="button" onClick={() => setToast("")} aria-label="关闭提示"><X size={15} /></button></Notice></div>}
     {action && <Confirm action={action} disabled={writeDisabled} close={() => setAction(null)} complete={(message) => { setAction(null); setToast(message); }} />}
   </div>;
