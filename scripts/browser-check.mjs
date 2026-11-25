@@ -95,7 +95,8 @@ async function openConsole(page, address) {
   await page.getByText("中台在线", { exact: true }).waitFor();
 }
 const capture = async (page, name) => {
-  if (shot) await page.screenshot({ path: join(screenshots, name + ".png"), fullPage: true, animations: "disabled" });
+  const representative = /^(router-(?:light-.+|dark-.+|mobile(?:-nav|-chain)?|history|approval|continued|chain-done|archived))$/;
+  if (shot && representative.test(name)) await page.screenshot({ path: join(screenshots, "v0.4.5-" + name + ".png"), fullPage: true, animations: "disabled" });
 };
 const noOverflow = async (page) => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
 
@@ -123,7 +124,10 @@ try {
   await openConsole(page, address);
   const navigate = (name) => page.getByRole("navigation").getByRole("link", { name }).click();
   const rail = page.getByRole("complementary", { name: "工作台侧栏" });
-  const newTask = () => rail.getByRole("button", { name: "新建任务", exact: true }).click();
+  const newTask = async () => {
+    await rail.getByRole("button", { name: "新建任务", exact: true }).click();
+    await page.getByRole("heading", { name: "今天想完成什么？" }).waitFor();
+  };
   const add = () => rail.getByRole("button", { name: "添加项目", exact: true }).click();
   const remove = async (name) => {
     await rail.getByRole("button", { name: "管理项目 " + name, exact: true }).click();
@@ -270,6 +274,7 @@ try {
   await newTask();
   const sendRouter = async (message) => {
     await taskInput.fill(message);
+    await routerPanel.locator(".task-send:enabled").waitFor();
     await taskInput.press("Enter");
   };
   await project.getByRole("option", { name: /game-box/ }).waitFor({ state: "attached" });
@@ -300,7 +305,7 @@ try {
   await routerPanel.getByText("执行中", { exact: true }).waitFor();
   await capture(page, "router-running");
   await hub.finish(simple, { outcome: "done", summary: "README 错别字已修正。" });
-  await routerPanel.getByText("README 错别字已修正。", { exact: true }).waitFor();
+  await routerPanel.locator(".task-response").getByText("README 错别字已修正。", { exact: true }).waitFor();
   await noOverflow(page);
   await capture(page, "router-completed");
   await routerPanel.getByRole("link", { name: "查看执行详情" }).click();
@@ -314,7 +319,7 @@ try {
   await oldTask.click();
   await page.reload();
   await routerPanel.getByRole("heading", { name: "帮我修改 README 中的错别字" }).waitFor();
-  await routerPanel.getByText("README 错别字已修正。", { exact: true }).waitFor();
+  await routerPanel.locator(".task-response").getByText("README 错别字已修正。", { exact: true }).waitFor();
   await capture(page, "router-history");
   await newTask();
   await sendRouter("帮我重构调度模块并完成相关测试");
@@ -324,6 +329,63 @@ try {
   await hub.finish(plan, { outcome: "done", summary: "规划验证完成。", ask: [{ title: "确认规划范围", text: "请选择测试范围。", options: ["继续", "结束"] }] });
   await routerPanel.getByRole("link", { name: /等待审批 · 确认规划范围/ }).waitFor();
   await capture(page, "router-approval");
+  const rootTask = "#router/" + plan.run;
+  await routerPanel.getByRole("link", { name: /等待审批 · 确认规划范围/ }).click();
+  await page.getByRole("radio", { name: "继续", exact: true }).check();
+  await page.getByRole("button", { name: "提交回复" }).click();
+  await page.getByText("答复已提交。", { exact: true }).waitFor();
+  await page.evaluate((hash) => { location.hash = hash; }, rootTask);
+  await routerPanel.getByText(/审批已处理 · 等待后续任务/).waitFor();
+  const follow = (await hub.claimRouter()).job;
+  assert.notEqual(follow.run, plan.run);
+  assert.equal(follow.context.events[0].type, "card.answered");
+  await routerPanel.getByText("审批后继续执行", { exact: true }).waitFor();
+  await routerPanel.locator(".task-stages summary").click();
+  await capture(page, "router-continued");
+  await hub.finish(follow, { outcome: "done", summary: "初步处理，不是最终摘要。", ask: [
+    { title: "确认发布步骤", text: "第二次审批。", options: ["继续", "结束"] },
+    { title: "确认核对步骤", text: "另一条分支。", options: ["继续", "结束"] },
+  ] });
+  await routerPanel.getByRole("link", { name: /等待审批 · 确认发布步骤/ }).waitFor();
+  await hub.asFeishu("确认发布步骤");
+  const publish = (await hub.claimRouter()).job;
+  assert.equal(publish.context.events.length, 1);
+  await hub.finish(publish, { outcome: "done", summary: "发布分支已完成。" });
+  await routerPanel.getByRole("link", { name: /等待审批 · 确认核对步骤/ }).waitFor();
+  assert.equal(await routerPanel.getByRole("heading", { name: /任务摘要/ }).count(), 0);
+  await hub.asFeishu("确认核对步骤");
+  const verify = (await hub.claimRouter()).job;
+  assert.notEqual(verify.run, publish.run);
+  await hub.finish(verify, { outcome: "failed", error: "分支暂时失败" });
+  await routerPanel.getByText("等待重试", { exact: true }).waitFor();
+  assert.equal(await routerPanel.getByRole("heading", { name: /任务摘要/ }).count(), 0);
+  const recovered = hub.claimRetry(verify.run);
+  await hub.finish(recovered, { outcome: "done", summary: "核对分支重试后完成。" });
+  await routerPanel.getByRole("heading", { name: "任务摘要 · Run #" + verify.run }).waitFor();
+  await page.reload();
+  assert.equal(new URL(page.url()).hash, rootTask);
+  await routerPanel.getByRole("heading", { name: "任务摘要 · Run #" + publish.run }).waitFor();
+  await routerPanel.locator(".task-response").getByText("核对分支重试后完成。", { exact: true }).waitFor();
+  await capture(page, "router-chain-done");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await noOverflow(page);
+  await capture(page, "router-mobile-chain");
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await newTask();
+  await sendRouter("验证审批后取消分支");
+  await routerPanel.getByText("排队中", { exact: true }).waitFor();
+  const cancelRoot = (await hub.claimRouter()).job;
+  await hub.finish(cancelRoot, { outcome: "done", summary: "初始摘要不可当作最终结果。", ask: [
+    { title: "批准取消测试", text: "将取消后续轮次。", options: ["继续", "结束"] },
+  ] });
+  await routerPanel.getByRole("link", { name: /等待审批 · 批准取消测试/ }).waitFor();
+  await hub.asFeishu("批准取消测试");
+  const stopped = (await hub.claimRouter()).job;
+  await hub.cancel(stopped);
+  await hub.finish(stopped, { outcome: "cancelled" });
+  await routerPanel.getByText("已取消", { exact: true }).waitFor();
+  assert.equal(await routerPanel.getByRole("heading", { name: /任务摘要/ }).count(), 0);
   await newTask();
   await project.selectOption("game-box");
   await page.reload();
@@ -347,6 +409,10 @@ try {
   const original = (await firstAttempt).postDataJSON();
   await routerPanel.getByRole("alert").waitFor();
   assert.equal(await taskInput.inputValue(), original.message);
+  await taskInput.fill("结果未确认时不自动提交另一请求");
+  await taskButton.click();
+  await routerPanel.getByRole("alert").getByText(/请保留原内容、项目和执行方案重试/).waitFor();
+  await taskInput.fill(original.message);
   const retry = page.waitForRequest(taskRequest);
   await taskButton.click();
   assert.deepEqual((await retry).postDataJSON(), original);
@@ -356,14 +422,47 @@ try {
   assert.equal(direct.context.events[0].type, "router.project.game-box.plan");
   assert.equal(direct.rule.cwd, join(home, "game-box"));
   await hub.finish(direct, { outcome: "done", summary: "第二个项目执行完成。" });
-  await routerPanel.getByText("第二个项目执行完成。", { exact: true }).waitFor();
+  await routerPanel.locator(".task-response").getByText("第二个项目执行完成。", { exact: true }).waitFor();
+  const historyTarget = routerPanel.getByLabel("下一项任务的项目");
+  await historyTarget.selectOption("default");
+  assert.equal(await historyTarget.inputValue(), "default");
+  await page.evaluate((id) => { location.hash = "#router/" + id; }, simple.run);
+  const delayedDirect = "**/api/runs/" + direct.run + "/why?view=router-chain";
+  let allowHistory;
+  const historyRelease = new Promise((resolve) => { allowHistory = resolve; });
+  await page.route(delayedDirect, async (route) => {
+    const reply = await route.fetch();
+    await historyRelease;
+    await route.fulfill({ response: reply }).catch(() => {});
+  }, { times: 1 });
+  const oldRead = page.waitForRequest((request) => request.url().endsWith("/" + direct.run + "/why?view=router-chain"));
+  await page.evaluate((id) => { location.hash = "#router/" + id; }, direct.run);
+  await oldRead;
+  await page.evaluate((id) => { location.hash = "#router/" + id; }, simple.run);
+  await routerPanel.getByRole("heading", { name: "帮我修改 README 中的错别字" }).waitFor();
+  allowHistory();
+  assert.equal(await historyTarget.inputValue(), "default");
+  await page.evaluate((id) => { location.hash = "#router/" + id; }, direct.run);
+  await routerPanel.locator(".task-response").getByText("第二个项目执行完成。", { exact: true }).waitFor();
+  assert.equal(await historyTarget.inputValue(), "game-box");
+  assert.equal(await rail.getByRole("button", { name: "game-box", exact: true }).getAttribute("aria-pressed"), "true");
+  await page.goBack();
+  await routerPanel.getByRole("heading", { name: "帮我修改 README 中的错别字" }).waitFor();
+  assert.equal(await historyTarget.inputValue(), "default");
+  await page.goForward();
+  await routerPanel.locator(".task-response").getByText("第二个项目执行完成。", { exact: true }).waitFor();
+  assert.equal(await historyTarget.inputValue(), "game-box");
+  await page.reload();
+  await routerPanel.locator(".task-response").getByText("第二个项目执行完成。", { exact: true }).waitFor();
+  assert.equal(await historyTarget.inputValue(), "game-box");
+  await mode.selectOption("direct");
 
   await taskInput.fill("验证执行错误与重试");
   await taskButton.click();
   await routerPanel.getByText("排队中", { exact: true }).waitFor();
   const retryJob = (await hub.claimRouter()).job;
   await hub.finish(retryJob, { outcome: "failed", error: "示例服务暂时无法连接。" });
-  await routerPanel.getByText("等待重试", { exact: false }).waitFor();
+  await routerPanel.getByText("等待重试", { exact: true }).waitFor();
   await routerPanel.getByRole("alert").getByText("示例服务暂时无法连接").waitFor();
   await capture(page, "router-retry");
   hub.exhaustRouter(retryJob.run);
@@ -417,7 +516,15 @@ try {
   await registered.waitFor({ state: "detached" });
   assert.equal(await project.inputValue(), "default");
   await rail.getByText("历史项目", { exact: true }).click();
-  await rail.getByRole("link", { name: /检查网页添加的项目/ }).waitFor();
+  await rail.getByRole("link", { name: /检查网页添加的项目/ }).click();
+  await routerPanel.getByText(/历史项目（已移除或目录已变更）/).waitFor();
+  assert.equal(await historyTarget.inputValue(), "");
+  await taskInput.fill("确认选择前不能提交");
+  assert.equal(await taskButton.isDisabled(), true);
+  await capture(page, "router-archived");
+  await historyTarget.selectOption("default");
+  assert.equal(await taskButton.isEnabled(), true);
+  await newTask();
 
   await add();
   await addProject.getByLabel("项目名称").fill("模型档位项目");
@@ -451,6 +558,14 @@ try {
   assert.equal(await modelPicker.inputValue(), "private-model");
   await capture(page, "router-model-dialog");
   await profile.getByRole("button", { name: "关闭" }).click();
+  await mode.selectOption("direct");
+  await tier.selectOption("fast");
+  await page.evaluate((id) => { location.hash = "#router/" + id; }, direct.run);
+  await historyTarget.getByRole("option", { name: "game-box" }).waitFor({ state: "attached" });
+  await page.waitForFunction(() => document.querySelector('select[aria-label="下一项任务的项目"]')?.value === "game-box");
+  assert.equal(await tier.inputValue(), "default");
+  await newTask();
+  await project.selectOption(await tierProject.getAttribute("value"));
   await mode.selectOption("direct");
   await tier.selectOption("fast");
   await advanced.click();
@@ -530,10 +645,13 @@ try {
   await page.getByRole("heading", { name: "已配置 Agent" }).waitFor();
   await page.getByRole("row", { name: /项目 Codex/ }).getByText("继承 Codex CLI 默认", { exact: true }).first().waitFor();
   assert.ok(await page.getByRole("row", { name: /巡检脚本.*离线/ }).count());
+  const sidebarPage = page.waitForResponse((response) => response.url().includes("/api/state?before=") && response.ok());
+  await rail.getByRole("button", { name: "加载更早任务", exact: true }).click();
+  assert.ok((await (await sidebarPage).json()).runs.length > 0);
   await navigate("运行设置");
   const feishuPanel = page.locator("section").filter({ has: page.getByRole("heading", { name: "飞书", exact: true }) });
   await feishuPanel.getByText("未启用", { exact: true }).waitFor();
-  await feishuPanel.getByText("待配置", { exact: true }).waitFor();
+  await feishuPanel.getByText(/^(在线|离线)$/).waitFor();
   await page.getByText("fixture-local", { exact: true }).waitFor();
   const dismiss = page.getByRole("button", { name: "关闭提示" });
   if (await dismiss.isVisible()) await dismiss.click();
@@ -541,6 +659,79 @@ try {
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   await noOverflow(page);
   await capture(page, "settings-light");
+  const recovery = await context.newPage();
+  recovery.setDefaultTimeout(12_000);
+  await recovery.goto(address + "#router/" + direct.run);
+  const recoveryRouter = recovery.locator(".router-panel");
+  await recoveryRouter.locator(".task-response").getByText("第二个项目执行完成。", { exact: true }).waitFor();
+  const recoveryInput = recoveryRouter.getByLabel("消息");
+  await recoveryInput.fill("尚未提交的草稿");
+  const oldSnapshot = await recovery.evaluate(() => fetch("/api/state").then((res) => res.json()));
+  const replacement = { ...oldSnapshot, seq: 0, runs: [], nextBefore: null, hasMore: false };
+  const chainPattern = "**/api/runs/" + direct.run + "/why?view=router-chain";
+  let oldChainResponse;
+  const heldChain = new Promise((resolve) => { oldChainResponse = resolve; });
+  let replacedHub = false;
+  let holdReads = false;
+  await recovery.route(chainPattern, async (route) => {
+    if (!replacedHub && holdReads) {
+      const response = await route.fetch();
+      await heldChain;
+      await route.fulfill({ response }).catch(() => {});
+      return;
+    }
+    if (replacedHub) return route.fulfill({ status: 404, json: { error: "没有这一轮" } });
+    return route.continue();
+  });
+  await recovery.route("**/api/state", async (route) => {
+    if (replacedHub) return route.fulfill({ json: replacement });
+    if (holdReads) return route.fulfill({ json: { ...oldSnapshot, seq: oldSnapshot.seq + 1 } });
+    return route.continue();
+  });
+  holdReads = true;
+  const delayedRead = recovery.waitForRequest((request) => request.url().endsWith("/" + direct.run + "/why?view=router-chain"));
+  await recovery.getByRole("button", { name: "刷新状态" }).click();
+  await delayedRead;
+  replacedHub = true;
+  await recovery.getByRole("button", { name: "刷新状态" }).click();
+  await recoveryRouter.getByText(/当前中台没有这个 Run/).waitFor();
+  oldChainResponse();
+  assert.equal(await recoveryInput.inputValue(), "尚未提交的草稿");
+  assert.equal(await recoveryRouter.getByRole("button", { name: "发送", exact: true }).isDisabled(), true);
+
+  await recovery.unroute(chainPattern);
+  const liveChain = await recovery.evaluate((id) => fetch("/api/runs/" + id + "/why?view=router-chain").then((res) => res.json()), direct.run);
+  liveChain.history.message = "新数据实例中的同编号任务";
+  liveChain.history.projectScope = "f".repeat(64);
+  await recovery.route(chainPattern, (route) => route.fulfill({ json: liveChain }));
+  replacement.seq = 1;
+  await recovery.getByRole("button", { name: "刷新状态" }).click();
+  await recoveryRouter.getByRole("heading", { name: "新数据实例中的同编号任务" }).waitFor();
+  assert.equal(await recoveryRouter.getByLabel("下一项任务的项目").inputValue(), "");
+  await recoveryRouter.getByLabel("下一项任务的项目").selectOption("default");
+  await recoveryRouter.getByLabel("执行模式").selectOption("direct");
+  let releaseSubmit;
+  const heldSubmit = new Promise((resolve) => { releaseSubmit = resolve; });
+  let submits = 0;
+  await recovery.route("**/api/router/task", async (route) => {
+    submits++;
+    await heldSubmit;
+    await route.fulfill({ json: { action: "execute", status: "submitted", run: { id: 999, state: "queued" } } }).catch(() => {});
+  });
+  const posting = recovery.waitForRequest(taskRequest);
+  await recoveryRouter.getByRole("button", { name: "发送", exact: true }).click();
+  const submittedId = (await posting).postDataJSON().requestId;
+  replacement.hubIdentity = "replacement-instance";
+  await recovery.getByRole("button", { name: "刷新状态" }).click();
+  await recoveryRouter.getByText(/原提交结果未知/).waitFor();
+  releaseSubmit();
+  await recoveryInput.press("Enter");
+  assert.equal(submits, 1);
+  assert.equal(typeof submittedId, "string");
+  assert.equal(await recoveryInput.inputValue(), "尚未提交的草稿");
+  assert.equal(new URL(recovery.url()).hash, "#router/" + direct.run);
+  await recovery.close();
+
   await hub.close();
   await page.getByRole("button", { name: "刷新状态" }).click();
   await page.locator(".topbar").getByText("中台离线", { exact: true }).waitFor();
@@ -551,5 +742,5 @@ try {
   await restored;
   await page.getByRole("heading", { name: "运行设置" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("通过。临时真实中台 + Chromium 验证了原有控制台流程、项目添加和移除、AI 自动判断、直接创建任务、Fast 档位设置、领取及移除保护、DSH 模型保存、隔离浏览器表单及断线重试。");
+  console.log("通过。Chromium + 临时真实中台验证项目绑定、审批分支、重试与取消、代次恢复和原有控制台流程。");
 } finally { await dispose(); }

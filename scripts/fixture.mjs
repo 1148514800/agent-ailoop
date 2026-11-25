@@ -24,7 +24,7 @@ export async function fixture(home) {
       router: { name: "Router 测试 Agent", use: "command", worker: "router-worker", command: ["node", "--version"] },
       runner: { name: "巡检脚本", use: "command", worker: "ops-runner", command: ["node", "-e", "process.exit(0)"] },
     },
-    channels: { terminal: { name: "测试通道" } },
+    channels: { terminal: { name: "测试通道" }, feishu: { name: "飞书测试通道", answerers: ["fixture-user"] } },
     rules: [
       eventRule("知识库同步", "codex", "docs.changed"),
       eventRule("客户反馈分流", "claude", "feedback.new"),
@@ -41,6 +41,7 @@ export async function fixture(home) {
   const worker = runtime.addKey("worker", "studio-mac");
   const local = runtime.addKey("source", "local");
   const channel = runtime.addKey("channel", "terminal");
+  const feishu = runtime.addKey("channel", "feishu");
   const routerWorker = runtime.addKey("worker", "router-worker");
   const timer = (offset) => new Date(Date.now() + offset).toISOString();
   const historical = Date.now() - 3 * 86_400_000;
@@ -127,5 +128,20 @@ export async function fixture(home) {
       runtime.execute("finish", [job.run, job.token, { outcome: "failed", error: "示例服务暂时无法连接" }], at + 1);
     }
   }
-  return { url, emit, claim, finish, state, close, disconnect, running, exhaustRouter, claimRouter: () => claim([], routerWorker) };
+  const asFeishu = async (title) => {
+    const card = (await state()).cards.find((item) => item.title === title);
+    assert.ok(card, title);
+    const ref = "fixture-message-" + card.id;
+    await call("/v1/cards/" + card.id + "/delivered", "POST", feishu, { version: card.version, ref });
+    return call("/v1/cards/" + card.id + "/answer", "POST", feishu, { choice: 0, by: "fixture-user", ref });
+  };
+  const cancel = (job) => call("/v1/runs/" + job.run + "/cancel", "POST", owner, {});
+  function claimRetry(id) {
+    const run = runtime.getView().get("runs", id);
+    const job = runtime.execute("claimNext", ["router-worker", "retry-" + (++serial)], Date.parse(run.not_before) + 1);
+    assert.equal(job.run, id);
+    return job;
+  }
+  return { url, emit, claim, finish, state, close, disconnect, running, exhaustRouter, asFeishu, cancel, claimRetry,
+    claimRouter: () => claim([], routerWorker) };
 }

@@ -1,11 +1,11 @@
-import { routerHistory } from "./router-history.ts";
+import { routerChain, routerHistory } from "./router-history.ts";
 import type { Fact } from "../shared/types.ts";
 import type { FeishuChatStatus } from "../shared/types.ts";
 import { serveBrowserCheck } from "./browser-proof.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { Buffer } from "node:buffer";
 import { redact, safeFact } from "./hub.ts";
@@ -50,7 +50,7 @@ async function readObject(req: IncomingMessage): Promise<Row> {
   throw new RequestError(400, "请求必须是一个 JSON 对象。");
 }
 
-type Route = { path: string; stream?: boolean; why?: boolean; historyRun?: number; fields?: string[]; answer?: boolean };
+type Route = { path: string; stream?: boolean; why?: boolean; historyRun?: number; chain?: boolean; fields?: string[]; answer?: boolean };
 
 function route(method: string | undefined, url: URL, req: IncomingMessage): Route | null {
   const { pathname, searchParams } = url;
@@ -69,8 +69,9 @@ function route(method: string | undefined, url: URL, req: IncomingMessage): Rout
       }
     } else if (/^\/api\/runs\/[1-9]\d*\/why$/.test(pathname)) {
       const id = pathname.split("/")[3];
-      if (number(id) && (!url.search || (searchParams.size === 1 && searchParams.get("view") === "router"))) {
-        return { path: pathname.replace("/api/", "/v1/"), why: true, historyRun: url.search ? Number(id) : undefined };
+      const view = searchParams.get("view");
+      if (number(id) && (!url.search || (searchParams.size === 1 && (view === "router" || view === "router-chain")))) {
+        return { path: pathname.replace("/api/", "/v1/"), why: true, historyRun: url.search ? Number(id) : undefined, chain: view === "router-chain" };
       }
     } else return null;
     throw new RequestError(400, "查询参数不正确。");
@@ -90,10 +91,11 @@ function route(method: string | undefined, url: URL, req: IncomingMessage): Rout
   return null;
 }
 
-function stateForBrowser(value: Row) {
+function stateForBrowser(value: Row, hub: Hub) {
   const { agents, rulesRevision, ...rest } = value;
   return {
-    ...rest, ...(typeof rulesRevision === "string" && /^[a-f0-9]{64}$/.test(rulesRevision) && { rulesRevision }),
+    ...rest, hubIdentity: createHmac("sha256", hub.owner).update("autoloop-console:" + hub.url).digest("hex"),
+    ...(typeof rulesRevision === "string" && /^[a-f0-9]{64}$/.test(rulesRevision) && { rulesRevision }),
     agents: Array.isArray(agents) ? (agents as Row[]).map(({ id, name, use, worker, seenAt, online, totals }) =>
       ({ id, name, use, worker, seenAt, online, totals })) : agents,
   };
@@ -266,8 +268,22 @@ export function createConsole(options: {
           return json(res, upstream.status, { error: typeof value?.error === "string" ? value.error : "中台拒绝了请求。" }, hub);
         }
         if (target.stream) throw new Error("Invalid stream response");
-        if (target.historyRun) return json(res, 200, routerHistory(target.historyRun, value as Fact[]), hub);
-        return json(res, upstream.status, target.why ? (value as Row[]).map(safeFact) : target.path.startsWith("/v1/state") ? stateForBrowser(value) : value, hub);
+        if (target.historyRun) {
+          const history = routerHistory(target.historyRun, value as Fact[]);
+          if (!history || !target.chain) return json(res, 200, history, hub);
+          const chain = await routerChain(history, value as Fact[], async (id) => {
+            try {
+              const response = await fetch(hub.url + "/v1/runs/" + id + "/why", {
+                redirect: "error", signal: AbortSignal.any([active, AbortSignal.timeout(2000)]),
+                headers: { authorization: "Bearer " + hub.owner },
+              });
+              if (!response.ok) { await response.body?.cancel(); return null; }
+              return await response.json() as Fact[];
+            } catch { return null; }
+          });
+          return json(res, 200, { history, chain }, hub);
+        }
+        return json(res, upstream.status, target.why ? (value as Row[]).map(safeFact) : target.path.startsWith("/v1/state") ? stateForBrowser(value, hub) : value, hub);
       } catch (error) {
         if (error instanceof RequestError) throw error;
         if (res.headersSent) { res.end(); return; }

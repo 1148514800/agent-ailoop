@@ -15,6 +15,7 @@ export const dataHome = () => process.env.AGENT_AUTOLOOP_HOME ?? join(homedir(),
 export const rulesFile = () => resolve(process.env.AGENT_AUTOLOOP_RULES ?? join(dataHome(), "rules.json"));
 export const metadataFile = (file: string) => file + ".router-projects.json";
 export const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+export const projectScopeOf = (id: string, cwd: string) => digest(JSON.stringify([id, cwd]));
 
 export function parseRouterRules(raw: string) {
   try {

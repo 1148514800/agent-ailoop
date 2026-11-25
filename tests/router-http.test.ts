@@ -357,6 +357,11 @@ test("project discovery, dispatch and restart recovery preserve project and plan
     assert.equal(history.projectScope, (await projects()).projects.find(({ id }: { id: string }) => id === "game-box").scope);
     await save({ ...rules, rules: [rule, { ...added, cwd: codexHome }] });
     assert.notEqual(history.projectScope, (await projects()).projects.find(({ id }: { id: string }) => id === "game-box").scope);
+    const beforeMovedSubmit = state().sources[0].events;
+    const wrongDirectory = await submit({ ...plan, requestId: randomUUID(), projectScope: history.projectScope });
+    assert.equal(wrongDirectory.status, 409);
+    assert.match((await wrongDirectory.json()).error, /项目目录已变更/);
+    assert.equal(state().sources[0].events, beforeMovedSubmit);
     assert.deepEqual(await fetch(historyUrl, { headers: { cookie } }).then((response) => response.json()), history);
     await save({ ...rules, rules: [rule, added] });
 

@@ -49,7 +49,8 @@ function Brand() {
 }
 
 function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): void; theme: Theme; setTheme(value: Theme): void }) {
-  const [route, setRoute] = useState(readRoute);
+  const [route, setRoute] = useState(() => ({ ...readRoute(), visit: 0 }));
+  const [taskTarget, setTaskTarget] = useState<{ visit: number; epoch: AbortSignal; id: string }>();
   const [mobileNav, setMobileNav] = useState(false);
   const [rail, setRail] = useState(() => localStorage.getItem("autoloop-sidebar") !== "closed");
   const [reset, setReset] = useState(0);
@@ -61,7 +62,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
   const [resumed, setResumed] = useState<Map<string, Pause>>(() => new Map());
   const live = useLive(expired);
   const { state, online } = live;
-  const work = useRouterWorkspace(state, live.generation);
+  const work = useRouterWorkspace(state, live.epoch);
   useEffect(() => { localStorage.setItem("autoloop-sidebar", rail ? "open" : "closed"); }, [rail]);
   useEffect(() => {
     if (!mobileNav) return;
@@ -70,7 +71,11 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
     return () => document.removeEventListener("keydown", dismiss);
   }, [mobileNav]);
   useEffect(() => {
-    const onHash = () => { setRoute(readRoute()); setMobileNav(false); };
+    const onHash = () => {
+      const next = readRoute();
+      setRoute((previous) => ({ ...next, visit: previous.visit + Number(previous.page.id !== next.page.id || previous.detail !== next.detail) }));
+      setMobileNav(false);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -79,7 +84,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
     const timer = setTimeout(() => setToast(""), 5500);
     return () => clearTimeout(timer);
   }, [toast]);
-  useEffect(() => { setResumed(new Map()); }, [live.generation]);
+  useEffect(() => { setResumed(new Map()); setAction(null); }, [live.generation]);
   const navigate = (hash: string) => {
     if (location.hash !== hash) location.hash = hash;
     else setMobileNav(false);
@@ -100,13 +105,13 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
       await live.refresh();
     }
   };
-  const sendRouter: SendRouterMessage = async (body, mode) => {
+  const sendRouter: SendRouterMessage = async (body, mode, signal) => {
     try {
-      const result = await api<RouterResult>(mode === "direct" ? "/router/task" : "/router/message", { body, csrf });
-      if (result.action === "execute") void live.refresh();
+      const result = await api<RouterResult>(mode === "direct" ? "/router/task" : "/router/message", { body, csrf, signal });
+      if (!signal.aborted && result.action === "execute") void live.refresh();
       return result;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) expired();
+      if (!signal.aborted && error instanceof ApiError && error.status === 401) expired();
       throw error;
     }
   };
@@ -114,13 +119,18 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
   const pid = route.page.id;
   const detailId = positiveId(route.detail);
   const upToDate = state && !live.error;
+  const activeTask = pid === "router" ? detailId : null;
+  const drawerId = route.query.get("details") === "1" ? detailId : positiveId(route.query.get("details"));
+  const targetProject = activeTask
+    ? taskTarget?.visit === route.visit && taskTarget.epoch === live.epoch ? taskTarget.id : ""
+    : work.projectId;
   return <div className={`layout ${rail ? "" : "rail-closed"} ${pid === "router" ? "router-layout" : ""}`}>
     {mobileNav && <button className="nav-scrim" type="button" aria-label="关闭导航" onClick={() => setMobileNav(false)} />}
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`} aria-label="工作台侧栏">
       <a className="brand-link" href="#router" aria-label="Autoloop 新建任务" onClick={(event) => { event.preventDefault(); freshTask(); }}><Brand /></a>
       <div className="rail-primary"><button type="button" className="rail-command rail-new" disabled={routerPending} onClick={freshTask}>
         <SquarePen size={16} /><span>新建任务</span></button>
-      <ProjectSidebar work={work} active={pid === "router" ? detailId : null} select={(project) => {
+      <ProjectSidebar work={work} active={activeTask} targetProject={targetProject} select={(project) => {
         if (routerPending) return;
         work.setProjectId(project.id); freshTask();
       }} open={(id) => navigate("#router/" + id)} add={addProject} remove={(project) => { setMobileNav(false); setRemoving(project); }} />
@@ -147,11 +157,11 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
       <main className={pid === "router" ? "content router-content" : "content"} id="main-content">
         {live.error && <ErrorLine>{live.error}{state && ` 当前显示 ${fmtDate(state.now, state.timezone, "full")} 的快照。`}</ErrorLine>}
         <div className="router-host" hidden={pid !== "router"}>
-          <RouterPanel visible={pid === "router"} reset={reset} id={pid === "router" ? detailId : null} state={state} facts={live.facts}
-            work={work} send={sendRouter} act={write} add={addProject} navigate={navigate} setPending={setRouterPending} online={online} />
+          <RouterPanel visible={pid === "router"} reset={reset} id={activeTask} state={state} epoch={live.epoch} visit={route.visit} setTaskTarget={setTaskTarget}
+            work={work} send={sendRouter} act={write} add={addProject} navigate={navigate} setPending={setRouterPending} online={online && !live.error} />
         </div>
-        {pid === "router" && detailId && route.query.get("details") === "1" && state &&
-          <RunDetail key={detailId} id={detailId} state={state} facts={live.facts} act={write}
+        {pid === "router" && detailId && (route.query.get("details") === "1" || drawerId) && state &&
+          <RunDetail key={live.generation + ":" + (drawerId ?? detailId)} id={drawerId ?? detailId} state={state} facts={live.facts} act={write}
             close={() => navigate("#router/" + detailId)} choose={setAction} disabled={writeDisabled} />}
         {pid === "router" ? null : pid === "settings" ? <Settings live={live} /> : state ? <>
           {pid === "overview" && <Dashboard state={state} newTask={freshTask} />}
@@ -161,7 +171,7 @@ function Shell({ csrf, expired, theme, setTheme }: { csrf: string; expired(): vo
           {pid === "agents" && <Agents state={state} act={write} />}
           {pid === "approvals" && <Approvals key={live.generation} state={state} act={write} disabled={writeDisabled} id={detailId} navigate={navigate} />}
           {pid === "events" && <EventFeed facts={live.facts} state={state} connection={live.stream} />}
-          {pid === "runs" && detailId && <RunDetail key={detailId} id={detailId} state={state} facts={live.facts} act={write}
+          {pid === "runs" && detailId && <RunDetail key={live.generation + ":" + detailId} id={detailId} state={state} facts={live.facts} act={write}
             close={() => navigate("#runs" + (route.query.size ? "?" + route.query : ""))} choose={setAction}
             disabled={writeDisabled} />}
         </> : <>

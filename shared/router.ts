@@ -59,6 +59,16 @@ export type RouterHistory = {
   approvals: { id: number; title: string }[];
 };
 
+export type RouterApproval = {
+  id: number; title: string; state: "open" | "decided" | "done" | "closed";
+  answerEvent: number | null; runs: number[];
+};
+
+export type RouterChain = {
+  runs: { run: Run; approvals: RouterApproval[] }[];
+  incomplete: boolean;
+};
+
 // Pair the rule and event, including the version of a generated rule. A rule name alone
 // also appears on manually triggered runs and approval continuations.
 export function routerProjectOf(rule: string, events: { type: string; subject?: string | null }[]) {

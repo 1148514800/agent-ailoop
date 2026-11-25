@@ -17,7 +17,7 @@ import { classify, parseRequirements, RouterError } from "./router.ts";
 import type { routerConfig } from "./router.ts";
 
 import { configSnapshot, dataHome, digest, eventPrefix, loadRules, parseRouterRules, replaceConfig, metadataFile, PROJECT_PREFIX,
-  readProjectMetadata, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
+  projectScopeOf, readProjectMetadata, ruleName, rulesFile, validProject, withProjectLock } from "./router-rule-config.ts";
 import { projectManagement } from "./router-project-management.ts";
 import { codexModelIds, executionConfig, isModelProfile, profileRule, saveProfile } from "./router-profiles.ts";
 
@@ -192,20 +192,28 @@ export function createRouter(options: {
       const availablePlans = matchingPlans(plans, rules, entry.id).map(({ plan, rule }) => ({
         ...plan, execution: publicExecution(executionConfig(rules, rule.to, rule.execution)!, secrets),
       }));
-      return { ...entry, scope: digest(JSON.stringify([entry.id, base.cwd])), execution, profiles, plans: availablePlans };
+      return { ...entry, scope: projectScopeOf(entry.id, base.cwd), execution, profiles, plans: availablePlans };
     })) };
   }
 
   async function submit(body: Record<string, unknown>, signal: AbortSignal, mode: RouterMode = "auto", probe?: { summary: string }, remote?: { authorize(): Promise<void> }) {
-    const { requestId, message, needsPlan } = body;
+    const { requestId, message, needsPlan, projectScope } = body;
     const choice = body.executionProfile === undefined ? "default" : body.executionProfile;
     const projectId = body.projectId === undefined && mode === "auto" ? "default" : body.projectId;
-    const allowed = mode === "direct" ? ["requestId", "message", "projectId", "needsPlan", "executionProfile", "requirements"] : ["requestId", "message", "projectId", "executionProfile"];
+    const allowed = mode === "direct" ? ["requestId", "message", "projectId", "projectScope", "needsPlan", "executionProfile", "requirements"] : ["requestId", "message", "projectId", "projectScope", "executionProfile"];
     if (Object.keys(body).some((field) => !allowed.includes(field)) || typeof requestId !== "string" || !UUID.test(requestId) ||
         typeof message !== "string" || !message.trim() || !message.isWellFormed() || [...message].length > ROUTER_MESSAGE_LIMIT) {
       throw new RouterError(400, "请输入有效的 UUID 与 1 到 4000 字的消息。");
     }
     if (!validProject(projectId)) throw new RouterError(400, "项目编号格式不正确。");
+    if (projectScope !== undefined && (typeof projectScope !== "string" || !/^[a-f0-9]{64}$/.test(projectScope))) {
+      throw new RouterError(400, "项目身份格式不正确。");
+    }
+    const checkScope = (rules: Rules) => {
+      if (projectScope && projectScopeOf(projectId, projectRule(rules, projectId).cwd) !== projectScope) {
+        throw new RouterError(409, "项目目录已变更。请刷新后重新选择目标项目。");
+      }
+    };
     if (mode === "direct" && typeof needsPlan !== "boolean") throw new RouterError(400, "先规划再执行必须是布尔值。");
     const declared = parseRequirements(body.requirements);
     if (Object.hasOwn(body, "requirements") && !declared) throw new RouterError(400, "任务类型或工具能力字段不正确。");
@@ -217,6 +225,7 @@ export function createRouter(options: {
     const identity: unknown[] = [message, projectId, mode, needsPlan ?? null];
     if (choice !== "default") identity.push(choice);
     if (declared) identity.push(declared);
+    if (projectScope) identity.push(projectScope);
     const fingerprint = digest(JSON.stringify(identity));
     const changed = () => new RouterError(409, "该请求编号已用于另一条消息、项目或执行策略。");
     let entry = recent.get(id);
@@ -244,6 +253,7 @@ export function createRouter(options: {
 
       const requestedRules = !saved && mode === "auto" && (body.projectId !== undefined || choice === "auto") ? await loadRules() : undefined;
       if (requestedRules && body.projectId !== undefined) projectRule(requestedRules, projectId);
+      if (requestedRules) checkScope(requestedRules);
       const available = requestedRules && choice === "auto"
         ? MODEL_PROFILES.flatMap((level) => {
           const variant = profileRule(requestedRules, projectId, level);
@@ -294,10 +304,13 @@ export function createRouter(options: {
 
       let rule = saved?.rule ?? ruleName(projectId);
       let eventId = saved ? await store.receipt() : undefined;
-      if (saved && eventId === undefined) {
+      if (saved && (eventId === undefined || projectScope)) {
         const existing = await hubRequest<{ event: number; source: string } | undefined>(
           hub, "/v1/events?key=router-" + id, hub.source.key, signal,
         );
+        if (eventId !== undefined && existing?.event !== eventId) {
+          throw new RouterError(409, "当前中台无法确认原请求对应的事件。请核对记录，提交结果未知。");
+        }
         if (existing) {
           if (existing.source !== hub.source.name || !Number.isSafeInteger(existing.event) || existing.event < 1) {
             throw new RouterError(409, "中台返回的事件来源或编号与本机请求不符。");
@@ -309,6 +322,7 @@ export function createRouter(options: {
         const source = hub.source;
         const file = rulesFile();
         const dispatch = async (rules: Rules) => {
+          checkScope(rules);
           const baseRoute = await validateProject(rules, projectId, source.name);
           const active = await guardRevision(hub, rules, signal);
           const plans = matchingPlans((await readPlans()).entries, rules, projectId);

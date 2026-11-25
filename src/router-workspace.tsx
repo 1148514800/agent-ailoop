@@ -16,40 +16,46 @@ export const taskTitle = (message: string, fallback: string) => {
   return chars.length > 64 ? chars.slice(0, 64).join("") + "…" : first || fallback;
 };
 
-export function useRouterWorkspace(state: State | null, generation: number) {
+export function useRouterWorkspace(state: State | null, epoch: AbortSignal) {
   const [projects, setProjects] = useState<RouterProject[]>([]);
   const [projectId, setProjectId] = useState(() => localStorage.getItem("autoloop-project") ?? "");
   const [classifierModel, setClassifierModel] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [projectError, setProjectError] = useState("");
   const [reload, setReload] = useState(0);
-  const [pages, setPages] = useState<State[]>([]);
-  const [entries, setEntries] = useState<Record<number, RouterHistory | null>>({});
-  const [paging, setPaging] = useState(false);
+  const [cache, setCache] = useState<{ epoch: AbortSignal; pages: State[]; entries: Record<number, RouterHistory | null> }>({ epoch, pages: [], entries: {} });
+  const pages = cache.epoch === epoch ? cache.pages : [];
+  const entries: Record<number, RouterHistory | null> = cache.epoch === epoch ? cache.entries : {};
+  const [pagingEpoch, setPagingEpoch] = useState<AbortSignal | null>(null);
+  const paging = pagingEpoch === epoch;
+  const [projectSnapshot, setProjectSnapshot] = useState<{ epoch: AbortSignal; revision: string | undefined }>();
   const [historyError, setHistoryError] = useState("");
   const [retry, setRetry] = useState(0);
   const [notice, setNotice] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setProjectError("");
-    void api<{ projects: RouterProject[]; classifierModel: string | null }>("/router/projects", { signal: controller.signal })
+    void api<{ projects: RouterProject[]; classifierModel: string | null }>("/router/projects", { signal: AbortSignal.any([controller.signal, epoch]) })
       .then(({ projects, classifierModel }) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || epoch.aborted) return;
+        setProjectSnapshot({ epoch, revision: state?.rulesRevision });
         setProjects(projects);
         setClassifierModel(classifierModel);
         setProjectId((id) => projects.find((item) => item.id === id && !item.error)?.id ??
           projects.find((item) => item.id === "default" && !item.error)?.id ?? projects.find((item) => !item.error)?.id ??
           projects.find((item) => item.id === id)?.id ?? projects[0]?.id ?? "");
       }).catch((error) => {
-        if (!controller.signal.aborted) setProjectError(messageOf(error));
-      }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        if (!controller.signal.aborted && !epoch.aborted) setProjectError(messageOf(error));
+      }).finally(() => { if (!controller.signal.aborted && !epoch.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [reload, state?.rulesRevision, generation]);
-  const project = projects.find((item) => item.id === projectId);
+  }, [reload, state?.rulesRevision, epoch]);
+  const currentProjects = projectSnapshot?.epoch === epoch ? projects : [];
+  const projectsPending = loading || (!projectError && projectSnapshot?.revision !== state?.rulesRevision);
+  const project = currentProjects.find((item) => item.id === projectId);
   useEffect(() => {
-    if (!loading && project && !project.error) localStorage.setItem("autoloop-project", project.id);
-  }, [loading, project]);
-  useEffect(() => { setPages([]); setEntries({}); setHistoryError(""); }, [generation]);
+    if (!projectsPending && project && !project.error) localStorage.setItem("autoloop-project", project.id);
+  }, [projectsPending, project]);
+  useEffect(() => { setCache({ epoch, pages: [], entries: {} }); setHistoryError(""); }, [epoch]);
 
   const runs = mergeRuns(state?.runs ?? [], pages.flatMap((page) => page.runs))
     .filter((run) => !run.manual && routerProjectOf(run.rule, run.events));
@@ -57,32 +63,39 @@ export function useRouterWorkspace(state: State | null, generation: number) {
   useEffect(() => {
     if (!candidateIds) return;
     const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, epoch]);
     const ids = candidateIds.split(",").map(Number).filter((id) => !Object.hasOwn(entries, id));
     async function read() {
-      for (let offset = 0; !controller.signal.aborted && offset < ids.length; offset += 4) {
+      for (let offset = 0; !signal.aborted && offset < ids.length; offset += 4) {
         const results = await Promise.all(ids.slice(offset, offset + 4).map(async (id) => {
-          try { return [id, await api<RouterHistory | null>(historyPath(id), { signal: controller.signal })] as const; }
+          try { return [id, await api<RouterHistory | null>(historyPath(id), { signal })] as const; }
           catch { return null; }
         }));
-        if (controller.signal.aborted) return;
+        if (signal.aborted) return;
         if (results.includes(null)) setHistoryError("部分历史任务暂时无法读取。");
-        setEntries((previous) => ({ ...previous, ...Object.fromEntries(results.filter((row) => row !== null)) }));
+        setCache((previous) => previous.epoch !== epoch || signal.aborted ? previous : {
+          ...previous, entries: { ...previous.entries, ...Object.fromEntries(results.filter((row) => row !== null)) },
+        });
       }
     }
     void read();
     return () => controller.abort();
-  }, [candidateIds, generation, retry]); // The cached rows only change which IDs the next batch needs.
+  }, [candidateIds, epoch, retry]); // The cached rows only change which IDs the next batch needs.
   const cursor = pages.length ? pages.at(-1)!.nextBefore : state?.nextBefore;
   async function loadOlder() {
-    if (!cursor || paging) return;
-    setPaging(true); setHistoryError("");
-    try { const page = await api<State>("/state?before=" + cursor); setPages((previous) => [...previous, page]); }
-    catch (error) { setHistoryError(messageOf(error)); }
-    finally { setPaging(false); }
+    if (!cursor || paging || epoch.aborted) return;
+    setPagingEpoch(epoch); setHistoryError("");
+    try {
+      const page = await api<State>("/state?before=" + cursor, { signal: epoch });
+      if (!epoch.aborted && page.hubIdentity === state?.hubIdentity) {
+        setCache((previous) => previous.epoch === epoch ? { ...previous, pages: [...previous.pages, page] } : previous);
+      }
+    } catch (error) { if (!epoch.aborted) setHistoryError(messageOf(error)); }
+    finally { if (!epoch.aborted) setPagingEpoch(null); }
   }
 
   return {
-    projects, project, projectId, setProjectId, classifierModel, loading, projectError,
+    projects: currentProjects, project, projectId, setProjectId, classifierModel, loading: projectsPending, projectError,
     reloadProjects: () => { setLoading(true); setReload((value) => value + 1); },
     history: runs.flatMap((run) => {
       const entry = entries[run.id];
@@ -97,8 +110,8 @@ export function useRouterWorkspace(state: State | null, generation: number) {
 
 export type RouterWorkspace = ReturnType<typeof useRouterWorkspace>;
 
-export function ProjectSidebar({ work, active, select, open, add, remove }: {
-  work: RouterWorkspace; active: number | null; select(project: RouterProject): void; open(id: number): void;
+export function ProjectSidebar({ work, active, targetProject, select, open, add, remove }: {
+  work: RouterWorkspace; active: number | null; targetProject: string; select(project: RouterProject): void; open(id: number): void;
   add(): void; remove(project: RouterProject): void;
 }) {
   const [search, setSearch] = useState<string | null>(null);
@@ -107,16 +120,18 @@ export function ProjectSidebar({ work, active, select, open, add, remove }: {
   const filter = search?.trim().toLowerCase() ?? "";
   const matching = work.history.filter(({ title, run }) => title.toLowerCase().includes(filter) ||
     String(run.id).includes(filter.replace(/^run\s*#?\s*|^#/, "")));
-  const activeScopes = new Set(work.projects.flatMap((project) => project.scope ? [project.scope] : []));
+  const activeScopes = new Set(work.projects.flatMap((project) => project.scope ? [project.id + ":" + project.scope] : []));
   const archived = new Map<string, typeof matching>();
   for (const entry of matching) {
-    if (!activeScopes.has(entry.projectScope)) archived.set(entry.projectScope, [...(archived.get(entry.projectScope) ?? []), entry]);
+    const key = entry.projectId + ":" + entry.projectScope;
+    if (!activeScopes.has(key)) archived.set(key, [...(archived.get(key) ?? []), entry]);
   }
   const taskLink = ({ run, title }: typeof matching[number]) => {
     const [label, tone] = runLabels[runStatus(run)] ?? runLabels.unknown;
-    return <a key={run.id} className="project-task" href={"#router/" + run.id} title={title + " · Run #" + run.id + " · " + label}
+    const stageLabel = "初始轮次 · " + label;
+    return <a key={run.id} className="project-task" href={"#router/" + run.id} title={title + " · Run #" + run.id + " · " + stageLabel}
       aria-current={active === run.id ? "page" : undefined} onClick={(event) => { event.preventDefault(); open(run.id); }}>
-      <span className={"task-dot task-dot-" + tone} aria-label={label} /><span>{title}</span>
+      <span className={"task-dot task-dot-" + (tone === "green" ? "neutral" : tone)} aria-label={stageLabel} /><span>{title}</span>
     </a>;
   };
   return <>
@@ -131,15 +146,15 @@ export function ProjectSidebar({ work, active, select, open, add, remove }: {
       <div className="rail-section-label">项目</div>
       <div className="project-scroll">
         {work.projects.map((project) => {
-          const children = project.scope ? matching.filter((entry) => entry.projectScope === project.scope) : [];
+          const children = project.scope ? matching.filter((entry) => entry.projectId === project.id && entry.projectScope === project.scope) : [];
           if (filter && !children.length) return null;
-          const expanded = !!filter || !(collapsed[project.id] ?? project.id !== work.projectId);
+          const expanded = !!filter || !(collapsed[project.id] ?? project.id !== targetProject);
           const Icon = expanded ? ChevronDown : ChevronRight;
           return <div key={project.id} className="rail-project">
-            <div className="project-row" data-selected={work.projectId === project.id}>
+            <div className="project-row" data-selected={targetProject === project.id}>
               <button type="button" className="project-toggle" aria-label={(expanded ? "折叠 " : "展开 ") + project.name}
                 aria-expanded={expanded} onClick={() => setCollapsed((previous) => ({ ...previous, [project.id]: expanded }))}><Icon size={14} /></button>
-              <button type="button" className="project-name" title={project.name} aria-pressed={work.projectId === project.id}
+              <button type="button" className="project-name" title={project.name} aria-pressed={targetProject === project.id}
                 onClick={() => { select(project); setMenu(null); setCollapsed((previous) => ({ ...previous, [project.id]: false })); }}><Folder size={16} /><span>{project.name}</span></button>
               {project.directory && <button type="button" className="project-menu-button" aria-label={"管理项目 " + project.name} aria-expanded={menu === project.id}
                 onClick={() => setMenu(menu === project.id ? null : project.id)}>···</button>}
@@ -150,7 +165,7 @@ export function ProjectSidebar({ work, active, select, open, add, remove }: {
             {expanded && (children.length ? children.map(taskLink) : <p className="rail-empty">暂无已加载任务</p>)}
           </div>;
         })}
-        {!!archived.size && <details className="archived-projects" open={filter ? true : undefined}>
+        {!!archived.size && <details className="archived-projects" open={filter || [...archived.values()].flat().some(({ run }) => run.id === active) ? true : undefined}>
           <summary><History size={15} /> 历史项目</summary>
           {[...archived].map(([scope, children]) => <div key={scope}><p className="rail-empty" title={children[0].projectId}>{children[0].projectId}</p>{children.map(taskLink)}</div>)}
         </details>}

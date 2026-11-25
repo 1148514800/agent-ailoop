@@ -534,3 +534,12 @@ dialog::backdrop { background: var(--overlay); }
   .composer-select { font-size: .85rem; }
   .task-message { max-width: 94%; }
 }
+
+.task-stages { width: 100%; min-width: 0; color: var(--muted); }
+.task-stages summary { cursor: pointer; width: fit-content; padding: 4px 0; }
+.task-stages ol { display: grid; gap: 9px; margin: 6px 0 0 5px; padding-left: 13px; border-left: 1px solid var(--line); }
+.task-stages li { min-width: 0; overflow-wrap: anywhere; }
+.task-stage-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.task-state-amber { color: var(--amber); }
+.task-composer-project { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; }
+.task-composer-project .task-project-select { max-width: min(240px, 62vw); }

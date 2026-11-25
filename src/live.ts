@@ -16,6 +16,8 @@ export function useLive(onExpired: () => void) {
   const [lastError, setLastError] = useState<Diagnostic | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [generation, setGeneration] = useState(0);
+  const [epoch, setEpoch] = useState(() => new AbortController());
+  const currentEpoch = useRef(epoch);
   const refreshRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -23,6 +25,7 @@ export function useLive(onExpired: () => void) {
     let source: EventSource | null = null;
     let cursor: number | null = null;
     let snapshotSeq: number | null = null;
+    let hubIdentity: string | undefined;
     let pending: Promise<void> | null = null;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -85,7 +88,12 @@ export function useLive(onExpired: () => void) {
           return;
         }
         const fresh = snapshot.value;
-        if (snapshotSeq !== null && fresh.seq < snapshotSeq) {
+        const switched = hubIdentity !== undefined && fresh.hubIdentity !== undefined && hubIdentity !== fresh.hubIdentity;
+        if (switched || (snapshotSeq !== null && fresh.seq < snapshotSeq)) {
+          currentEpoch.current.abort();
+          const nextEpoch = new AbortController();
+          currentEpoch.current = nextEpoch;
+          setEpoch(nextEpoch);
           closeStream();
           clearTimeout(reconnectTimer);
           cursor = fresh.seq;
@@ -93,6 +101,7 @@ export function useLive(onExpired: () => void) {
           setGeneration((previous) => previous + 1);
           setStream("connecting");
         }
+        hubIdentity = fresh.hubIdentity;
         snapshotSeq = fresh.seq;
         cursor ??= fresh.seq;
         setState(fresh);
@@ -115,6 +124,7 @@ export function useLive(onExpired: () => void) {
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       lifetime.abort();
+      currentEpoch.current.abort();
       closeStream();
       clearInterval(interval);
       clearTimeout(refreshTimer);
@@ -123,7 +133,7 @@ export function useLive(onExpired: () => void) {
     };
   }, [onExpired]);
 
-  return { state, health, online, stream, facts, error, lastError, refreshing, generation, refresh: () => refreshRef.current() };
+  return { state, health, online, stream, facts, error, lastError, refreshing, generation, epoch: epoch.signal, refresh: () => refreshRef.current() };
 }
 
 export type Live = ReturnType<typeof useLive>;
