@@ -4,7 +4,7 @@
 // of the hub it writes in a receipt, so it needs no tool, no key and no connection to the hub at all.
 import { InputError } from "../kernel/errors.ts";
 import type { Job } from "../protocol/job.ts";
-import { parseResult, type Result } from "../protocol/validate.ts";
+import { parseResult, RESULT_DETAIL, type Result } from "../protocol/validate.ts";
 
 const FAILED = ["没跑成", "FAILED"];
 const NOTHING = ["没事可做", "NOTHING"];
@@ -115,6 +115,19 @@ export function fit(text: string, limit: number) {
   return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut;
 }
 
+function unmarkedReceipt(said: string) {
+  const candidate = [...said.matchAll(JSON_BLOCK)].at(-1);
+  if (!candidate) return undefined;
+  try {
+    const value = JSON.parse(candidate[1]);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const keys = Object.keys(value);
+    return keys.length && keys.every((key) => RECEIPT_FIELDS.includes(key)) ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** How the run ended is on the first line; what it wants of the hub in its last receipt. */
 export function readMessage(said: string): Message {
   const blocks = [...said.matchAll(BLOCK)];
@@ -136,24 +149,7 @@ export function readMessage(said: string): Message {
     return { ...message, problem: "回执的代码块没有结尾：结尾的 ``` 要单独占一行" };
   }
   if (block === undefined) {
-    const candidate = [...said.matchAll(JSON_BLOCK)].at(-1)?.[1];
-    if (candidate !== undefined) {
-      try {
-        const value = JSON.parse(candidate);
-        const keys = value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
-        if (
-          value &&
-          typeof value === "object" &&
-          !Array.isArray(value) &&
-          keys.length > 0 &&
-          keys.every((key) => RECEIPT_FIELDS.includes(key))
-        )
-          return { ...message, problem: "疑似回执的 JSON 代码块必须标记为 agent-autoloop" };
-      } catch {
-        // Unrelated JSON remains ordinary output.
-      }
-    }
-    return message;
+    return unmarkedReceipt(said) ? { ...message, problem: "疑似回执的 JSON 代码块必须标记为 agent-autoloop" } : message;
   }
   let receipt: unknown;
   try {
@@ -169,15 +165,32 @@ export function readMessage(said: string): Message {
   return { ...message, receipt: receipt as Record<string, unknown> };
 }
 
+/** The final answer's prose after its summary, with machine-readable actions removed. */
+export function reportBody(said: string) {
+  const withoutMarked = said.replace(BLOCK, "");
+  const unmarked = withoutMarked === said && !OPENED.test(said) ? unmarkedReceipt(said) : undefined;
+  const withoutReceipt = unmarked
+    ? said.slice(0, unmarked.index) + said.slice(unmarked.index! + unmarked[0].length)
+    : withoutMarked;
+  const prose = withoutReceipt.split(OPENED, 1)[0].trim();
+  const newline = prose.indexOf("\n");
+  const body = newline < 0 ? (prose.length > 500 ? prose : "") : prose.slice(newline + 1).trim();
+  if (!body) return undefined;
+  if (body.length <= RESULT_DETAIL) return body;
+  const characters = [...body];
+  return characters.length <= RESULT_DETAIL ? body : characters.slice(0, RESULT_DETAIL - 1).join("") + "…";
+}
+
 /** The result to hand in, checked as the hub will. What stands without the receipt comes back with the problem. */
 export function resultFrom(
   message: Message,
-  extra: Pick<Result, "session" | "usage">,
+  extra: Pick<Result, "session" | "usage" | "detail">,
 ): { result: Result; problem?: string } {
   const base: Result = {
     outcome: message.outcome,
     ...(message.summary !== undefined && { summary: fit(message.summary, 500) }),
     ...(message.error !== undefined && { error: fit(message.error, 500) }),
+    ...(extra.detail && message.outcome !== "failed" && { detail: extra.detail }),
     ...(extra.session && { session: extra.session }),
     ...(extra.usage && { usage: extra.usage }),
   };

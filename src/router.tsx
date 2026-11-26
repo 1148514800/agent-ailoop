@@ -280,8 +280,9 @@ export function RouterPanel({ visible, reset, id, state, epoch, visit, setTaskTa
             </div>)}
           </li>)}</ol>
         </details>}
-        {!page?.error && progress?.finished && progress.leaf.filter(({ run: stage }) => stage.summary).map(({ run: stage }) =>
-          <ResultText key={stage.id + stage.summary} value={stage.summary} label={progress.leaf.length > 1 ? "任务摘要 · Run #" + stage.id : "任务摘要"} />)}
+        {!page?.error && progress?.finished && progress.leaf.filter(({ run: stage }) => stage.summary || stage.detail).map(({ run: stage }) =>
+          <ResultText key={stage.id + stage.summary} value={[stage.summary, stage.detail].filter(Boolean).join("\n\n")}
+            label={(stage.detail ? "任务结果" : "任务摘要") + (progress.leaf.length > 1 ? " · Run #" + stage.id : "")} />)}
         {task?.chain.runs.filter(({ run: stage }) => stage.error).map(({ run: stage }) => <ErrorLine key={stage.id}>
           {task.chain.runs.length > 1 && "Run #" + stage.id + " · "}{responseText(stage.error)}
           {stageStatus(stage) === "retry" && stage.notBefore && state && <small> · {fmtDate(stage.notBefore, state.timezone, "full")} 后可重试</small>}

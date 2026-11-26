@@ -7,6 +7,7 @@ export const EVENT_TYPE = /^[a-z][a-z0-9_.-]{0,63}$/;
 export const ANSWER_TEXT = 4000;
 export const ANSWER_BY = 500;
 export const ANSWER_REF = 500;
+export const RESULT_DETAIL = 16000;
 /** A channel's own reference to the message it sent. */
 export const DELIVERY_REF = 500;
 export type Later = { key: string; at?: string; about?: string; cancel?: boolean };
@@ -25,6 +26,7 @@ export function addUsage(total: Usage | undefined, more: Usage | undefined): Usa
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
+  detail?: string;
   error?: string;
   session?: string;
   usage?: Usage;
@@ -158,7 +160,19 @@ export function parseResult(input: unknown): Result {
   }
   const result = { ...input } as Item;
   if (
-    !only(result, ["outcome", "summary", "error", "session", "usage", "ask", "notice", "resolve", "later", "events"])
+    !only(result, [
+      "outcome",
+      "summary",
+      "detail",
+      "error",
+      "session",
+      "usage",
+      "ask",
+      "notice",
+      "resolve",
+      "later",
+      "events",
+    ])
   ) {
     throw new InputError("结果里有不认识的字段");
   }
@@ -168,6 +182,7 @@ export function parseResult(input: unknown): Result {
   if (!optional(result.summary, 500) || !optional(result.error, 500) || !optional(result.session, 500)) {
     throw new InputError("summary、error、session 最多 500 字");
   }
+  if (!optional(result.detail, RESULT_DETAIL)) throw new InputError(`detail 最多 ${RESULT_DETAIL} 字`);
   if (!validUsage(result.usage)) throw new InputError("usage 要是对象，里面要是有限的非负数字");
   if (!listOf(result.ask, 5, validAsk)) {
     throw new InputError("ask 每一项要有 title、text 和 2 到 5 个 options，recommend 是其中一个的序号，最多 5 项");

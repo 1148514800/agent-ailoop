@@ -26,7 +26,7 @@ import { commandLine, processCommand } from "../host/command.ts";
 import type { Job } from "../protocol/job.ts";
 import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
-import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
+import { promptFor, readMessage, repairPrompt, reportBody, resultFrom } from "./contract.ts";
 import { loadUsage, saveUsage, usageDelta } from "./usage.ts";
 
 const RUNS = path.join(HOME, "worker", "runs");
@@ -365,6 +365,7 @@ export function createWorker({
     const original = { ...entry, turn: entry.turn - entry.repairs };
     const reading = read(original, adapter, 0);
     const { result } = resultFrom(readMessage(reading.text ?? ""), {
+      detail: reportBody(reading.text ?? ""),
       session: reading.session ?? (adapter.link ? entry.session : undefined),
       usage: entry.usage,
     });
@@ -419,7 +420,12 @@ export function createWorker({
       }
       return endWith(entry, { outcome: "failed", error: error.slice(0, 500), ...known, ...usage });
     }
-    const { result, problem } = resultFrom(readMessage(seen.text), { session, usage: entry.usage });
+    const original = entry.repairs ? read({ ...entry, turn: entry.turn - entry.repairs }, adapter, 0).text : seen.text;
+    const { result, problem } = resultFrom(readMessage(seen.text), {
+      detail: reportBody(original ?? seen.text),
+      session,
+      usage: entry.usage,
+    });
     if (entry.repairs && !problem && result.outcome === "failed") return discardReceipt(entry, adapter, result.error!);
     if (!problem) return endWith(entry, result);
     // Its work is done and only the receipt is wrong: it writes the receipt again, and does nothing again.

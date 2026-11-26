@@ -458,7 +458,14 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   const rule = ruleNamed(draft, run.rule);
   const summary = result.summary ?? "";
   const rejected: Rejected[] = [];
-  put(draft, "runs", id, { state: result.outcome, finished_at: draft.at, summary, error: null, cancel_at: null });
+  put(draft, "runs", id, {
+    state: result.outcome,
+    finished_at: draft.at,
+    summary,
+    error: null,
+    cancel_at: null,
+    ...(result.detail && { detail: result.detail }),
+  });
   closeOpen(draft, (key) => key === `run:${id}:failing`, "后来跑成了");
   closeOpen(draft, (key) => key === `run:${id}:unknown`, "结果回来了");
   const eventIds = eventsOf(draft.view, id).map((event) => event.id);
@@ -521,6 +528,30 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   else rejected = applyReceipt(draft, run, result);
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
   return { rejected };
+}
+
+function restoreReport(draft: Draft, id: number, given: Record<string, unknown>) {
+  if (
+    !given ||
+    typeof given !== "object" ||
+    Array.isArray(given) ||
+    Object.keys(given).length !== 2 ||
+    typeof given.session !== "string" ||
+    !given.session ||
+    typeof given.detail !== "string" ||
+    !given.detail.trim()
+  ) {
+    throw new InputError("请提供原会话编号和详细结果");
+  }
+  const { detail } = parseResult({ outcome: "done", detail: given.detail });
+  const run = draft.view.get("runs", id);
+  if (!run) throw new NotFound("没有这一轮");
+  if (!["done", "nothing"].includes(run.state) || run.session !== given.session) {
+    throw new Conflict("轮次状态或原会话编号不符");
+  }
+  if (run.detail === detail) return;
+  if (run.detail) throw new Conflict("这一轮已有详细结果");
+  put(draft, "runs", id, { detail });
 }
 
 function answer(draft: Draft, id: number, given: Row) {
@@ -801,6 +832,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     put(draft, "runs", id, { session: session ?? run.session, link: link ?? run.link, seen_at: draft.at });
   },
   finish,
+  restoreReport,
   cancel(draft, id) {
     const run = draft.view.get("runs", id);
     if (!run) throw new NotFound("没有这一轮");

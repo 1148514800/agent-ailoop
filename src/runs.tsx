@@ -5,6 +5,7 @@ import { active, agentName, amount, api, cost, fmtDate, labelOf, messageOf, runL
 import { mergeRuns } from "./model.ts";
 import { RunBadge, RunTable } from "./dashboard.tsx";
 import { Badge, Button, Details, Drawer, Empty, ErrorLine, Heading, Panel, Select } from "./ui.tsx";
+import { TaskMarkdown } from "./task-markdown.tsx";
 import type { Action } from "./ui.tsx";
 
 export type Act = <T>(path: string, body: object) => Promise<T>;
@@ -199,6 +200,8 @@ export function RunDetail({ id, state, facts, close, act, choose, disabled }: {
         ].filter(Boolean).join(" · ") || "未上报"] as [string, string]] : []),
       ]} />
       {row.summary && <div className="detail-block"><h4>结果</h4><p className="body-copy">{row.summary}</p></div>}
+      {typeof latest?.detail === "string" && latest.detail &&
+        <div className="detail-block"><h4>详细结果</h4><TaskMarkdown value={latest.detail} /></div>}
       {row.error && <ErrorLine>{row.error}</ErrorLine>}
       {["claimed", "queued"].includes(row.state) && !row.stopping && <Button icon={Square} variant="danger" onClick={stop} disabled={disabled}>停止任务</Button>}
     </>}
