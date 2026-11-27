@@ -1,0 +1,92 @@
+name: check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - id: scope
+        name: Check changed paths
+        shell: bash
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          base=""
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            base=HEAD^1
+          elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            base="$PUSH_BEFORE"
+          fi
+          hub_changed=true
+          if [[ -n "$base" ]] && files=$(git diff --no-renames --name-only "$base" HEAD) && [[ -n "$files" ]]; then
+            if ! grep -q '^agent-autoloop/' <<< "$files"; then
+              hub_changed=false
+            fi
+          fi
+          echo "hub_changed=$hub_changed" >> "$GITHUB_OUTPUT"
+      - name: Install Console dependencies
+        run: npm ci
+      - name: Check and build Console
+        run: |
+          npm run typecheck
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # The default Windows temp folder is inside AppData, which the workspace picker rejects.
+            mkdir -p .ci-tmp
+            export TMP=$(cygpath -w "$PWD/.ci-tmp")
+            export TEMP="$TMP"
+          fi
+          npm test
+          npm run build
+        shell: bash
+      - name: Install Hub dependencies
+        working-directory: agent-autoloop
+        run: npm ci
+      - name: Check Hub types and formatting
+        working-directory: agent-autoloop
+        run: |
+          npm run typecheck
+          npm run format:check
+        shell: bash
+      - name: Verify Hub HTTP and receipt handling for other changes
+        if: steps.scope.outputs.hub_changed == 'false'
+        working-directory: agent-autoloop
+        run: node --test tests/http.test.ts tests/contract.test.ts
+      - name: Test Hub on Unix
+        if: steps.scope.outputs.hub_changed == 'true' && runner.os != 'Windows'
+        working-directory: agent-autoloop
+        run: npm run test:quick
+      - name: Test Hub on Windows
+        if: steps.scope.outputs.hub_changed == 'true' && runner.os == 'Windows'
+        working-directory: agent-autoloop
+        run: npm run test:windows
+      - name: Simulate Hub scheduling and delivery
+        if: steps.scope.outputs.hub_changed == 'true' && runner.os == 'Linux'
+        working-directory: agent-autoloop
+        run: npm run test:sim
