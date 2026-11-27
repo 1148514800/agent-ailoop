@@ -17,7 +17,7 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" }).trim();
 
-test("it prints this commit's release and the commit, with nothing installed", () => {
+test("it prints its own release and commit, or dev for a vendored copy, with nothing installed", () => {
   const empty = join(dir, "nothing-installed");
   const env: NodeJS.ProcessEnv = { ...process.env, AGENT_AUTOLOOP_HOME: empty };
   delete env.AGENT_AUTOLOOP_COMMIT;
@@ -28,7 +28,7 @@ test("it prints this commit's release and the commit, with nothing installed", (
     { env, encoding: "utf8" },
   );
   assert.equal(done.status, 0, done.stderr);
-  const commit = git(root, "rev-parse", "HEAD").slice(0, 12);
+  const commit = existsSync(join(root, ".git")) ? git(root, "rev-parse", "HEAD").slice(0, 12) : "dev";
   assert.equal(done.stdout.trim(), `agent-autoloop ${releaseOf(root) ?? "未发布"}（提交 ${commit}）`);
   assert.ok(!existsSync(empty), "asking the version sets nothing up");
 });

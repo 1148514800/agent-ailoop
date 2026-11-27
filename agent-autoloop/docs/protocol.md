@@ -228,7 +228,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 // Result
 {
   "outcome": "done" | "nothing" | "failed" | "cancelled",
-  "summary": "一句话", "error": "没跑成的原因", "session": "…",
+  "summary": "一句话", "detail": "详细结果正文", "error": "没跑成的原因", "session": "…",
   "usage": { "input": 0, "output": 0, "cached": 0, "cost": 0 },
   // 下面就是回执，一个事务里一次生效
   "ask":     [{ "title", "text", "options": ["…", "…"], "recommend": 0, "about": "留给接着干的自己", "key": "这件事的固定名字" }],
@@ -239,6 +239,8 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 }
 ```
 
+- `detail` 可选，最多 16000 字。接单程序把最后一条回复中摘要之后的正文交给中台。本人可通过轮次的 `why` 查询读取正文。分开部署时先升级 Hub，再升级 Worker。
+- `POST /v1/runs/12/report` 仅接受本人密钥。用 `{ "session": "原会话编号", "detail": "详细结果正文" }` 为已结束且会话匹配的旧轮次补录从原执行记录恢复的正文。相同正文可以重试，已有正文时拒绝覆盖。
 - 结果可以重放：响应丢了，同一个 token 再交一次同样的内容，得到同样的确认；内容不同返回 409。
 - `failed` 会重派，所以它只带 `notice`，其余的不生效；本人要停的这一轮交 `failed` 不再重派，`notice` 也不生效。
 - 需要本人恢复连接、登录或身份验证时，用 `done` 结束本轮并交 `ask`，不交 `failed`。`done` 表示本轮结束，未完成的事项由卡片继续跟进，不代表网页已经验收。同一阻塞已有 `open` 卡片时不重复提问，不用 `later` 定时重试；`waiting` 里同一阻塞已有的复查用 `cancel` 取消。保留已完成业务，`about` 写清恢复后只做哪些剩余步骤。

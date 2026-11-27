@@ -283,7 +283,7 @@ export function createConsole(options: {
           });
           return json(res, 200, { history, chain }, hub);
         }
-        return json(res, upstream.status, target.why ? (value as Row[]).map(safeFact) : target.path.startsWith("/v1/state") ? stateForBrowser(value, hub) : value, hub);
+        return json(res, upstream.status, target.why ? (value as Row[]).map((fact) => safeFact(fact, true)) : target.path.startsWith("/v1/state") ? stateForBrowser(value, hub) : value, hub);
       } catch (error) {
         if (error instanceof RequestError) throw error;
         if (res.headersSent) { res.end(); return; }

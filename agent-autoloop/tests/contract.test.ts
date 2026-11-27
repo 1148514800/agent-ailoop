@@ -12,7 +12,8 @@
 // characters, a link that isn't a web address), so the whole receipt is sent back to be rewritten or dropped.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { promptFor, readMessage, repairPrompt, resultFrom } from "../worker/contract.ts";
+import { RESULT_DETAIL } from "../protocol/validate.ts";
+import { promptFor, readMessage, repairPrompt, reportBody, resultFrom } from "../worker/contract.ts";
 
 const job = (over: object = {}) => ({
   run: 7,
@@ -259,4 +260,31 @@ test("asking for a rewrite says not to redo anything", () => {
   const text = repairPrompt("不是合法的 JSON");
   assert.match(text, /不是合法的 JSON/);
   assert.match(text, /不要重做/);
+});
+
+test("the final report retains Markdown outside the receipt without changing its one-line summary", () => {
+  const body = "## 测试入口\n\n| 脚本 | 命令 |\n| --- | --- |\n| smoke | npm test |";
+  const said = "\n已核对\n\n" + body + "\n\n```agent-autoloop\n{}\n```";
+  assert.deepEqual(resultFrom(readMessage(said), { detail: reportBody(said) }).result, {
+    outcome: "done",
+    summary: "已核对",
+    detail: body,
+  });
+  assert.equal(reportBody("仅一句话"), undefined);
+  assert.equal(reportBody("已核对\n可见正文\n```agent-autoloop\n内部回执"), "可见正文");
+});
+
+test("report prose excludes a malformed receipt and keeps ordinary JSON examples", () => {
+  const ordinary = '```json\n{"events":[],"count":0}\n```';
+  const unmarked = '```json\n{"later":[{"key":"k","about":"续办资料"}]}\n```';
+  const prose = "## 核对结果\n\n" + ordinary;
+  const said = "已核对\n\n" + prose + "\n\n" + unmarked;
+  assert.ok(readMessage(said).problem);
+  assert.equal(reportBody(said), prose);
+});
+
+test("the detailed result counts Unicode code points like the Hub", () => {
+  const body = "😀".repeat(RESULT_DETAIL);
+  assert.equal(reportBody("已核对\n" + body), body);
+  assert.equal(reportBody("已核对\n" + body + "x"), body.slice(2) + "…");
 });

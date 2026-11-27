@@ -33,7 +33,7 @@ export const cardLabels: Record<string, [string, string]> = {
   open: ["待处理", "amber"], decided: ["已回答", "blue"], done: ["已执行", "green"], closed: ["已结案", "neutral"],
 };
 export const factLabels: Record<string, string> = {
-  rules: "规则更新", ingest: "收到事件", claimNext: "Worker 领取", started: "开始执行", finish: "收到回执",
+  rules: "规则更新", ingest: "收到事件", claimNext: "Worker 领取", started: "开始执行", finish: "收到回执", restoreReport: "已补录详细结果",
   heartbeat: "Worker 心跳", workerSeen: "Worker 上报", channelSeen: "通道上报", delivered: "卡片已送达", failed: "卡片投递失败",
   answer: "卡片已回答", resolve: "卡片已结案", cancel: "请求停止", pauseRule: "规则暂停",
   resumeRule: "规则恢复", replayRule: "补跑跳过事件", runRule: "手动触发", tick: "定时检查",

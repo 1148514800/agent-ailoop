@@ -14,6 +14,7 @@ function runFromRow(id: number, last: FactRow, events: Run["events"] = []): Run 
     id, rule: text(last.rule), agent: text(last.agent), state: last.state as Run["state"], attempts: Number(last.attempts) || 0,
     createdAt: text(last.created_at), claimedAt: text(last.claimed_at) || null, finishedAt: text(last.finished_at) || null,
     notBefore: text(last.not_before) || null, summary: text(last.summary), error: text(last.error),
+    ...(typeof last.detail === "string" && { detail: last.detail }),
     link: text(last.link), session: text(last.session) || null, usage: null, stopping: !!last.cancel_at, manual: !!last.manual,
     events,
   };

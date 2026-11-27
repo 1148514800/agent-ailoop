@@ -251,6 +251,10 @@
           "type": "string",
           "maxLength": 500
         },
+        "detail": {
+          "type": "string",
+          "maxLength": 16000
+        },
         "usage": {
           "$ref": "#/$defs/usage"
         },

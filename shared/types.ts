@@ -5,7 +5,7 @@ export type RunState = "queued" | "claimed" | "unknown" | "done" | "nothing" | "
 export type RunEvent = { source: string; type: string; subject: string | null; summary: string | null; link: string | null };
 export type Run = {
   id: number; rule: string; agent: string; state: RunState; attempts: number; createdAt: string;
-  claimedAt: string | null; finishedAt: string | null; notBefore: string | null; summary: string; error: string;
+  claimedAt: string | null; finishedAt: string | null; notBefore: string | null; summary: string; detail?: string; error: string;
   link: string; session: string | null; usage: Usage | null; stopping: boolean; manual: boolean; events: RunEvent[];
 };
 export type Card = {

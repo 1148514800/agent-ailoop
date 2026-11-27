@@ -51,12 +51,13 @@ const fields: Record<string, string[]> = {
   seen: ["kind", "name", "seen_at"],
 };
 
-export function safeFact(fact: Row) {
+export function safeFact(fact: Row, includeRunDetail = false) {
   if (!Number.isSafeInteger(fact?.seq) || !Array.isArray(fact.changes)) throw new Error("Invalid fact");
   const changes = (fact.changes as { table: string; key: string; row: Row | null }[]).flatMap(({ table, key, row }) => {
     if (table === "config" && key === "rules") return [{ table, key, row: null }];
     if (!Object.hasOwn(fields, table)) return [];
-    return [{ table, key, row: row ? Object.fromEntries(fields[table].filter((name) => Object.hasOwn(row, name)).map((name) => [name, row[name]])) : null }];
+    const allowed = table === "runs" && includeRunDetail ? [...fields[table], "detail"] : fields[table];
+    return [{ table, key, row: row ? Object.fromEntries(allowed.filter((name) => Object.hasOwn(row, name)).map((name) => [name, row[name]])) : null }];
   });
   return { seq: fact.seq, at: fact.at, type: fact.type, changes };
 }

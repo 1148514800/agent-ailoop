@@ -157,8 +157,45 @@ test("a worker's wait: what arrives while it waits comes at once; nothing comes,
     body: { outcome: "done", summary: "别的" },
   });
   assert.equal(conflict.status, 409);
+  const path = `/v1/runs/${again.json.job.run}`;
+  const report = { session: "s", detail: "## 已核对\n\n详细步骤" };
+  assert.equal((await call(path + "/report", { key: keys.w2, body: report })).status, 401);
+  assert.equal((await call(path + "/report", { key: keys.owner, body: { ...report, session: "other" } })).status, 409);
+  assert.equal((await call(path + "/report", { key: keys.owner, body: report })).status, 200);
+  assert.equal((await call(path + "/report", { key: keys.owner, body: report })).status, 200);
+  assert.equal((await call(path + "/report", { key: keys.owner, body: { ...report, detail: "别的" } })).status, 409);
+  const facts = await call(path + "/why", { key: keys.owner });
+  assert.equal(
+    facts.json
+      .flatMap((fact: any) => fact.changes)
+      .filter((change: any) => change.table === "runs" && change.row?.detail === report.detail).length,
+    1,
+  );
   const bad = await call(`/v1/work?claim=${"x".repeat(201)}&wait=0`, { key: keys.w2 });
   assert.equal(bad.status, 400);
+});
+
+test("a worker's detailed result is kept with the run and does not enter a source's readback", async () => {
+  const event = await call("/v1/events", {
+    key: keys.ops,
+    body: { id: "report:1", type: "alert.raised", subject: "report" },
+  });
+  const {
+    json: { job },
+  } = await call("/v1/work?claim=report&wait=0", { key: keys.w2 });
+  const path = `/v1/runs/${job.run}`;
+  const detail = "测试入口为 `npm test`";
+  const finish = await call(path + "/result", { key: job.token, body: { outcome: "done", summary: "已核对", detail } });
+  assert.equal(finish.status, 200);
+  const facts = await call(path + "/why", { key: keys.owner });
+  assert.ok(
+    facts.json
+      .flatMap((fact: any) => fact.changes)
+      .some((change: any) => change.table === "runs" && change.row?.detail === detail),
+  );
+  const source = await call(`/v1/events/${event.json.event}`, { key: keys.ops });
+  assert.equal(source.status, 200);
+  assert.ok(!source.text.includes(detail));
 });
 
 test("a source tells under its own name, once per key; a worker only as its own task", async () => {
