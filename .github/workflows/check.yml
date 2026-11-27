@@ -44,18 +44,24 @@ jobs:
           elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
             base="$PUSH_BEFORE"
           fi
-          workflow_only=false
+          hub_changed=true
           if [[ -n "$base" ]] && files=$(git diff --no-renames --name-only "$base" HEAD) && [[ -n "$files" ]]; then
-            if ! grep -qv '^\.github/workflows/' <<< "$files"; then
-              workflow_only=true
+            if ! grep -q '^agent-autoloop/' <<< "$files"; then
+              hub_changed=false
             fi
           fi
-          echo "workflow_only=$workflow_only" >> "$GITHUB_OUTPUT"
+          echo "hub_changed=$hub_changed" >> "$GITHUB_OUTPUT"
       - name: Install Console dependencies
         run: npm ci
       - name: Check and build Console
         run: |
           npm run typecheck
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # The default Windows temp folder is inside AppData, which the workspace picker rejects.
+            mkdir -p .ci-tmp
+            export TMP=$(cygpath -w "$PWD/.ci-tmp")
+            export TEMP="$TMP"
+          fi
           npm test
           npm run build
         shell: bash
@@ -68,19 +74,19 @@ jobs:
           npm run typecheck
           npm run format:check
         shell: bash
-      - name: Verify Hub HTTP and receipt handling for workflow-only changes
-        if: steps.scope.outputs.workflow_only == 'true'
+      - name: Verify Hub HTTP and receipt handling for other changes
+        if: steps.scope.outputs.hub_changed == 'false'
         working-directory: agent-autoloop
         run: node --test tests/http.test.ts tests/contract.test.ts
       - name: Test Hub on Unix
-        if: steps.scope.outputs.workflow_only != 'true' && runner.os != 'Windows'
+        if: steps.scope.outputs.hub_changed == 'true' && runner.os != 'Windows'
         working-directory: agent-autoloop
         run: npm run test:quick
       - name: Test Hub on Windows
-        if: steps.scope.outputs.workflow_only != 'true' && runner.os == 'Windows'
+        if: steps.scope.outputs.hub_changed == 'true' && runner.os == 'Windows'
         working-directory: agent-autoloop
         run: npm run test:windows
       - name: Simulate Hub scheduling and delivery
-        if: steps.scope.outputs.workflow_only != 'true' && runner.os == 'Linux'
+        if: steps.scope.outputs.hub_changed == 'true' && runner.os == 'Linux'
         working-directory: agent-autoloop
         run: npm run test:sim

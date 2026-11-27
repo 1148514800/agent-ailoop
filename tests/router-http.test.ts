@@ -726,7 +726,9 @@ test("named plans bind each Run to the selected agent revision and reject unveri
   const providerFolder = join(home, "dsh-routes", customWorkerJob.agent.providerRef!);
   assert.ok((await readFile(join(providerFolder, "route.yml"), "utf8")).includes('"reasoningEffort": "high"'));
   assert.ok(!(await readFile(join(providerFolder, "route.yml"), "utf8")).includes(custom.provider.key));
-  assert.equal((await stat(join(providerFolder, ".credentials.yaml"))).mode & 0o077, 0);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(join(providerFolder, ".credentials.yaml"))).mode & 0o077, 0);
+  }
   await worker.result(customWorkerJob.run, customWorkerJob.token, { outcome: "done" });
   const now = Date.parse(state().runs.find((run) => run.id === codex.run)!.notBefore) + 10;
   const retry = hubRuntime.execute("claimNext", ["plans-worker", randomUUID()], now);
